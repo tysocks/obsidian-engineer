@@ -1,0 +1,28 @@
+{
+  "name": "obsidian-engineer",
+  "version": "0.1.0",
+  "description": "Engineering notebook plugin for Obsidian — Phase 1: Variable Store + Inline Math",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "node esbuild.config.mjs production"
+  },
+  "keywords": [
+    "obsidian",
+    "engineering",
+    "math",
+    "plugin"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^18.0.0",
+    "builtin-modules": "^3.3.0",
+    "esbuild": "^0.28.0",
+    "obsidian": "latest",
+    "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "hyperformula": "^2.7.1",
+    "mathjs": "^12.0.0"
+  }
+}

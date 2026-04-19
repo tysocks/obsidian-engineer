@@ -1,0 +1,10 @@
+{
+  "id": "obsidian-engineer",
+  "name": "Engineer",
+  "version": "0.1.0",
+  "minAppVersion": "1.0.0",
+  "description": "Engineering notebook: live variables, inline math evaluation, and cross-file variable sharing.",
+  "author": "Your Name",
+  "authorUrl": "https://github.com/yourname",
+  "isDesktopOnly": false
+}

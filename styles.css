@@ -1,0 +1,902 @@
+/* ============================================================
+   Engineer Plugin — styles.css
+   All component styles for the Variable Panel sidebar, inline
+   math computed-value display, and error indicators.
+   ============================================================ */
+
+/* ── Variable Panel sidebar ─────────────────────────────── */
+
+.eng-variable-panel {
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  font-size: 13px;
+  overflow: hidden;
+}
+
+.eng-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px 8px;
+  border-bottom: 1px solid var(--background-modifier-border);
+  flex-shrink: 0;
+}
+
+.eng-panel-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-normal);
+}
+
+.eng-panel-controls {
+  display: flex;
+  gap: 4px;
+}
+
+.eng-icon-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.eng-icon-btn:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+.eng-spinning {
+  animation: eng-spin 0.8s linear infinite;
+}
+
+@keyframes eng-spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+/* ── Context banner ─────────────────────────────────────── */
+
+.eng-context-banner {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 12px;
+  background: var(--background-secondary);
+  border-bottom: 1px solid var(--background-modifier-border);
+  font-size: 11px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+  min-height: 24px;
+}
+
+.eng-context-icon { flex-shrink: 0; }
+
+.eng-context-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-normal);
+  font-weight: 500;
+}
+
+.eng-context-none { font-style: italic; }
+
+/* ── Search ─────────────────────────────────────────────── */
+
+.eng-search-row {
+  padding: 8px 12px;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.eng-search-input {
+  width: 100%;
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-size: 12px;
+  color: var(--text-normal);
+  box-sizing: border-box;
+}
+
+.eng-search-input:focus {
+  outline: none;
+  border-color: var(--interactive-accent);
+}
+
+/* ── Scope sections ─────────────────────────────────────── */
+
+.eng-scope-section {
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.eng-section-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  cursor: pointer;
+  background: var(--background-secondary);
+  user-select: none;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.eng-section-header:hover { background: var(--background-modifier-hover); }
+
+.eng-section-label { flex: 1; }
+
+.eng-section-body { padding-bottom: 2px; }
+
+/* Accent colours per section type */
+.eng-section-local    .eng-section-header { border-left: 3px solid #7c8dfa; }
+.eng-section-folder   .eng-section-header { border-left: 3px solid #5bac72; }
+.eng-section-parent-folder .eng-section-header { border-left: 3px solid #8bb878; }
+.eng-section-tag      .eng-section-header { border-left: 3px solid #d4a843; }
+.eng-section-global   .eng-section-header { border-left: 3px solid var(--text-muted); }
+.eng-section-override .eng-section-header { border-left: 3px solid #fa7c52; }
+.eng-section-orphan   .eng-section-header { border-left: 3px solid #cc4444; }
+
+/* Context banner chips */
+.eng-context-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 12px;
+  background: var(--background-secondary);
+  border-bottom: 1px solid var(--background-modifier-border);
+  font-size: 11px;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+.eng-context-chip {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  color: var(--text-muted);
+}
+
+.eng-context-name {
+  font-weight: 500;
+  color: var(--text-normal);
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.eng-context-sep { color: var(--text-faint); }
+.eng-context-none { font-style: italic; color: var(--text-muted); font-size: 11px; }
+
+/* ── Variable groups ────────────────────────────────────── */
+
+.eng-var-group {
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.eng-group-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  cursor: pointer;
+  background: var(--background-secondary);
+  user-select: none;
+}
+
+.eng-group-header:hover {
+  background: var(--background-modifier-hover);
+}
+
+.eng-chevron {
+  font-size: 10px;
+  color: var(--text-muted);
+  width: 10px;
+  flex-shrink: 0;
+}
+
+.eng-group-name {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-normal);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.eng-group-count {
+  font-size: 11px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+/* ── Variable rows ──────────────────────────────────────── */
+
+.eng-var-list {
+  padding: 2px 0;
+}
+
+.eng-var-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 12px 3px 22px;
+  min-height: 24px;
+}
+
+.eng-var-row:hover {
+  background: var(--background-modifier-hover);
+}
+
+.eng-var-name {
+  font-family: var(--font-monospace);
+  font-size: 12px;
+  color: var(--text-accent);
+  cursor: pointer;
+  min-width: 80px;
+  flex-shrink: 0;
+}
+
+.eng-var-name:hover {
+  text-decoration: underline;
+}
+
+.eng-var-value {
+  font-family: var(--font-monospace);
+  font-size: 12px;
+  color: var(--text-normal);
+  cursor: pointer;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.eng-var-value:hover {
+  background: var(--background-secondary);
+  border-radius: 2px;
+}
+
+.eng-unit-badge {
+  font-size: 10px;
+  color: var(--text-muted);
+  background: var(--background-secondary);
+  padding: 1px 4px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+/* ── Source badges ──────────────────────────────────────── */
+
+.eng-source-badge {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 10px;
+  flex-shrink: 0;
+}
+
+.eng-source-import {
+  background: var(--background-secondary);
+  color: var(--text-muted);
+}
+
+.eng-source-computed {
+  background: #fff8e1;
+  color: #856404;
+}
+
+.theme-dark .eng-source-computed {
+  background: #3d2e00;
+  color: #f9c846;
+}
+
+.eng-source-override {
+  background: #fff3cd;
+  color: #664d03;
+  border: 1px solid #ffc107;
+}
+
+.theme-dark .eng-source-override {
+  background: #3a2500;
+  color: #ffc107;
+}
+
+/* ── Inline editor ──────────────────────────────────────── */
+
+.eng-inline-editor {
+  font-family: var(--font-monospace);
+  font-size: 12px;
+  background: var(--background-primary);
+  border: 1px solid var(--interactive-accent);
+  border-radius: 3px;
+  padding: 2px 6px;
+  color: var(--text-normal);
+  width: 120px;
+}
+
+/* ── Add dialog ─────────────────────────────────────────── */
+
+.eng-add-dialog {
+  padding: 12px;
+  background: var(--background-secondary);
+  border-top: 1px solid var(--background-modifier-border);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.eng-add-input {
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-size: 12px;
+  color: var(--text-normal);
+}
+
+.eng-add-input:focus {
+  outline: none;
+  border-color: var(--interactive-accent);
+}
+
+.eng-add-confirm {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  border: none;
+  border-radius: 4px;
+  padding: 5px 10px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.eng-add-cancel {
+  background: none;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  padding: 5px 10px;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+/* ── Empty state ────────────────────────────────────────── */
+
+.eng-empty-state {
+  padding: 24px 16px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+/* ── Footer ─────────────────────────────────────────────── */
+
+.eng-panel-footer {
+  padding: 6px 12px;
+  border-top: 1px solid var(--background-modifier-border);
+  flex-shrink: 0;
+  margin-top: auto;
+}
+
+.eng-footer-text {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+/* ── Inline math computed values ─────────────────────────── */
+/* These classes are injected into MathJax output via \htmlClass{} */
+
+.eng-computed {
+  color: var(--text-accent);
+  font-weight: 500;
+}
+
+.eng-error {
+  color: var(--text-error);
+}
+
+/* ── vars code fence ─────────────────────────────────────── */
+/* The ---vars and ---import blocks get a subtle custom background */
+
+.markdown-source-view .cm-line:has(.cm-hmd-frontmatter) {
+  /* Handled natively by Obsidian YAML highlighting */
+}
+
+/* Rendered vars block in Reading View — shown as a styled table */
+.eng-vars-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  margin: 0.5em 0 1em;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.eng-vars-table th {
+  background: var(--background-secondary);
+  padding: 5px 10px;
+  text-align: left;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.eng-vars-table td {
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--background-modifier-border-subtle, var(--background-modifier-border));
+  vertical-align: middle;
+}
+
+.eng-vars-table tr:last-child td {
+  border-bottom: none;
+}
+
+.eng-vars-table .eng-var-key {
+  font-family: var(--font-monospace);
+  font-size: 12px;
+  color: var(--text-accent);
+  width: 140px;
+}
+
+.eng-vars-table .eng-var-val {
+  font-family: var(--font-monospace);
+  font-size: 12px;
+}
+
+.eng-vars-table .eng-var-unit {
+  color: var(--text-muted);
+  font-size: 11px;
+  width: 80px;
+}
+
+.eng-vars-table .eng-var-comment {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+/* ── Scope badge (read-only indicator; global vars show no badge) ── */
+
+.eng-scope-badge {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 10px;
+  flex-shrink: 0;
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.eng-scope-local {
+  background: rgba(59, 130, 246, 0.15);
+  color: #3b82f6;
+}
+
+.eng-scope-folder {
+  background: rgba(234, 179, 8, 0.15);
+  color: #ca8a04;
+}
+
+.eng-scope-tag {
+  background: rgba(20, 184, 166, 0.15);
+  color: #0d9488;
+}
+
+.theme-dark .eng-scope-local  { color: #60a5fa; background: rgba(59, 130, 246, 0.2); }
+.theme-dark .eng-scope-folder { color: #fbbf24; background: rgba(234, 179, 8, 0.2); }
+.theme-dark .eng-scope-tag    { color: #2dd4bf; background: rgba(20, 184, 166, 0.2); }
+
+/* ── Scope dropdown (used in Add dialog only) ─────────────── */
+
+.eng-scope-dropdown {
+  font-size: 10px;
+  padding: 1px 3px;
+  border-radius: 3px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  color: var(--text-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+  max-width: 120px;
+}
+
+.eng-scope-dropdown:focus {
+  outline: none;
+  border-color: var(--interactive-accent);
+}
+
+/* ── Delete button ─────────────────────────────────────────── */
+
+.eng-delete-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 2px 3px;
+  border-radius: 3px;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.eng-var-row:hover .eng-delete-btn {
+  opacity: 1;
+}
+
+.eng-delete-btn:hover {
+  background: var(--background-modifier-error);
+  color: var(--text-error);
+}
+
+/* ── Orphan badge ──────────────────────────────────────────── */
+
+.eng-source-orphan {
+  background: #fdecea;
+  color: #b71c1c;
+}
+
+.theme-dark .eng-source-orphan {
+  background: #3b1212;
+  color: #ef9a9a;
+}
+
+/* ── Orphan and override group headers ─────────────────────── */
+
+.eng-group-orphan .eng-group-header {
+  background: #fdecea;
+}
+
+.theme-dark .eng-group-orphan .eng-group-header {
+  background: #3b1212;
+}
+
+.eng-group-override .eng-group-header {
+  background: #fff8e1;
+}
+
+.theme-dark .eng-group-override .eng-group-header {
+  background: #3a2500;
+}
+
+/* ── Add dialog improvements ────────────────────────────────── */
+
+.eng-add-scope-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.eng-add-scope-label {
+  font-size: 12px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.eng-add-tag-row {
+  margin-top: 2px;
+}
+
+.eng-add-btn-row {
+  display: flex;
+  gap: 6px;
+}
+
+.eng-input-error {
+  border-color: var(--text-error) !important;
+}
+
+/* ── Inline math computed value colour ──────────────────────
+   Computed values inside equations are coloured teal via the
+   LaTeX command \color{teal}{...} which MathJax renders natively.
+   No CSS is needed here for the colour itself — this class is kept
+   for any future DOM-level styling of the mjx-container wrappers.   */
+
+.eng-computed-value {
+  /* placeholder — colour is applied inside LaTeX via \color{teal} */
+}
+
+/* ── Math error span (shown when renderMath fails) ──────────── */
+
+.eng-math-error {
+  display: inline-block;
+  background: #fdecea;
+  color: #b71c1c;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-family: var(--font-monospace);
+  border: 1px solid #ef9a9a;
+}
+
+.theme-dark .eng-math-error {
+  background: #3b1212;
+  color: #ef9a9a;
+  border-color: #7f1010;
+}
+
+/* ── Spreadsheet (Phase 2) ───────────────────────────────────── */
+
+.eng-spreadsheet-container {
+  margin: 0.75em 0;
+  overflow-x: auto;
+}
+
+.eng-spreadsheet-name {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  margin-bottom: 4px;
+  padding-left: 2px;
+}
+
+.eng-spreadsheet-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  font-family: var(--font-monospace);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.eng-spreadsheet-th {
+  background: var(--background-secondary);
+  padding: 5px 10px;
+  text-align: left;
+  font-size: 11px;
+  font-family: var(--font-text);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--background-modifier-border);
+  white-space: nowrap;
+  user-select: none;
+}
+
+.eng-spreadsheet-td {
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--background-modifier-border-subtle, var(--background-modifier-border));
+  vertical-align: middle;
+  min-width: 80px;
+  cursor: default;
+}
+
+.eng-spreadsheet-row:last-child .eng-spreadsheet-td {
+  border-bottom: none;
+}
+
+.eng-spreadsheet-row:hover .eng-spreadsheet-td {
+  background: var(--background-modifier-hover);
+}
+
+/* Formula cells — show a subtle indicator */
+.eng-cell-formula {
+  color: var(--text-normal);
+  position: relative;
+}
+
+.eng-cell-formula::after {
+  content: "f";
+  font-size: 8px;
+  color: var(--text-faint);
+  position: absolute;
+  top: 2px;
+  right: 3px;
+  font-style: italic;
+  font-family: var(--font-text);
+}
+
+/* Error cells */
+.eng-cell-error {
+  color: var(--text-error);
+  font-size: 11px;
+  background: var(--background-modifier-error);
+}
+
+/* Highlight colors */
+.eng-cell-highlight-red {
+  background: #fdecea !important;
+  color: #b71c1c;
+  font-weight: 500;
+}
+.theme-dark .eng-cell-highlight-red {
+  background: #3b1212 !important;
+  color: #ef9a9a;
+}
+
+.eng-cell-highlight-amber {
+  background: #fffde7 !important;
+  color: #6d4c00;
+  font-weight: 500;
+}
+.theme-dark .eng-cell-highlight-amber {
+  background: #3a2500 !important;
+  color: #ffc107;
+}
+
+.eng-cell-highlight-green {
+  background: #e8f5e9 !important;
+  color: #1b5e20;
+  font-weight: 500;
+}
+.theme-dark .eng-cell-highlight-green {
+  background: #1b3a1b !important;
+  color: #a5d6a7;
+}
+
+.eng-cell-highlight-blue {
+  background: #e3f2fd !important;
+  color: #0d47a1;
+  font-weight: 500;
+}
+.theme-dark .eng-cell-highlight-blue {
+  background: #0d2137 !important;
+  color: #90caf9;
+}
+
+/* Editing state */
+.eng-cell-editing {
+  padding: 0 !important;
+  background: var(--background-primary) !important;
+}
+
+.eng-cell-input {
+  width: 100%;
+  border: 1px solid var(--interactive-accent);
+  background: var(--background-primary);
+  color: var(--text-normal);
+  font-family: var(--font-monospace);
+  font-size: 13px;
+  padding: 3px 8px;
+  outline: none;
+  border-radius: 0;
+  box-sizing: border-box;
+}
+
+/* Export badge */
+.eng-spreadsheet-export-badge {
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-top: 3px;
+  padding-left: 2px;
+  font-style: italic;
+}
+
+/* Hover pointer on formula cells */
+.eng-cell-formula:hover,
+.eng-spreadsheet-td:hover {
+  cursor: pointer;
+}
+
+/* ── Engineering Spreadsheet (.engsheet) ─────────────────── */
+
+.engsheet-export-cell {
+  background: #f0fff4 !important;
+}
+
+.theme-dark .engsheet-export-cell {
+  background: #0d2b1a !important;
+}
+
+.engsheet-selected {
+  outline: 2px solid var(--interactive-accent) !important;
+  z-index: 1;
+}
+
+/* ── Python Code Fence ──────────────────────────────────────── */
+
+.eng-python-container {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  overflow: hidden;
+  margin: 8px 0;
+  font-family: var(--font-monospace);
+}
+
+.eng-python-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  background: var(--background-secondary);
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.eng-python-run-btn {
+  padding: 2px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  border-radius: 4px;
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  border: none;
+  font-family: inherit;
+  transition: opacity 0.15s;
+}
+
+.eng-python-run-btn:hover { opacity: 0.85; }
+.eng-python-run-btn:disabled { opacity: 0.5; cursor: default; }
+
+.eng-python-label {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.eng-python-pre {
+  margin: 0;
+  padding: 10px 12px;
+  background: var(--background-primary);
+  overflow-x: auto;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.eng-python-code {
+  font-family: var(--font-monospace);
+  white-space: pre;
+}
+
+.eng-python-output-wrap {
+  border-top: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary-alt, var(--background-secondary));
+}
+
+.eng-python-output-label,
+.eng-python-export-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 4px 10px 2px;
+}
+
+.eng-python-output {
+  margin: 0;
+  padding: 6px 12px 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  color: var(--text-normal);
+  background: transparent;
+  border: none;
+}
+
+.eng-python-output.eng-python-error {
+  color: var(--color-red, #e05252);
+}
+
+.eng-python-export-table {
+  padding: 0 10px 8px;
+}
+
+.eng-python-vars-table {
+  font-size: 12px;
+  border-collapse: collapse;
+}
+
+.eng-python-var-name {
+  font-weight: 600;
+  padding: 1px 10px 1px 0;
+  color: var(--text-accent, var(--interactive-accent));
+}
+
+.eng-python-var-value {
+  padding: 1px 0;
+  color: var(--text-normal);
+}
