@@ -1,5 +1,5 @@
 /**
- * PythonEngine — runs `python` code fences via Pyodide (WASM).
+ * PythonEngine — runs `python` code fences using the system Python installation.
  *
  * SYNTAX
  * ──────
@@ -7,7 +7,6 @@
  * # export: delta, sigma_max
  * import numpy as np
  *
- * # Store variables are automatically injected as Python globals.
  * delta = F * L**3 / (48 * E * I)
  * sigma_max = M * c / I
  *
@@ -15,91 +14,103 @@
  * print(f"σ_max = {sigma_max:.2e} Pa")
  * ```
  *
- * DIRECTIVES
- * ──────────
- * # export: var1, var2   — write named variables back to Variable Store after run
+ * REQUIREMENTS
+ * ────────────
+ * Python 3 must be installed and available on PATH.
+ * Packages (numpy, scipy, etc.) must be installed via pip.
  *
  * STORE INTEGRATION
  * ─────────────────
- * All variables visible to the current file are injected before execution.
- * After execution, variables listed in `# export:` are read from Python
- * globals and written to the store with global visibility.
- *
- * PYODIDE
- * ───────
- * Loaded once from CDN on first use. Shared across all code fences.
- * Scientific packages (numpy, scipy) are available via micropip.
+ * All variables visible to the current file are injected as Python globals.
+ * Variables listed in `# export:` are read after execution and written to
+ * the store. Values are exchanged via a temporary JSON file — no special
+ * Python dependencies required.
  */
 
 import { MarkdownPostProcessorContext } from "obsidian";
-import { VariableStore } from "./VariableStore";
+import { VariableStore, VariableVisibility } from "./VariableStore";
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+type TagResolver = (filePath: string) => string[];
 
-interface PyodideInterface {
-  runPythonAsync(code: string): Promise<unknown>;
-  globals: {
-    set(key: string, value: unknown): void;
-    get(key: string): unknown;
-  };
-  setStdout(opts: { batched: (msg: string) => void }): void;
-  setStderr(opts: { batched: (msg: string) => void }): void;
-  version: string;
-}
+// Node.js built-ins — available in Electron's renderer with node integration.
+// esbuild marks builtins as external so these are resolved at runtime.
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const { execFile } = require("child_process") as typeof import("child_process");
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const os  = require("os")   as typeof import("os");
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const nodePath = require("path") as typeof import("path");
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const fs  = require("fs")   as typeof import("fs");
 
-declare global {
-  interface Window {
-    loadPyodide?: (opts: Record<string, unknown>) => Promise<PyodideInterface>;
-    __engineerPyodide?: Promise<PyodideInterface>;
-  }
-}
+// ─── Python discovery ─────────────────────────────────────────────────────────
 
-const PYODIDE_CDN = "https://cdn.jsdelivr.net/pyodide/v0.25.1/full/pyodide.js";
-const PYODIDE_INDEX_URL = "https://cdn.jsdelivr.net/pyodide/v0.25.1/full/";
+// Cache result across calls. undefined = not yet searched, null = not found.
+let cachedPython: string | null | undefined = undefined;
 
-// ─── Pyodide loader ───────────────────────────────────────────────────────────
-
-function loadScript(src: string): Promise<void> {
+function execAsync(cmd: string, args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
-    // Don't add the script twice
-    if (document.querySelector(`script[src="${src}"]`)) { resolve(); return; }
-    const script = document.createElement("script");
-    script.src = src;
-    script.onload = () => resolve();
-    script.onerror = () => reject(new Error(`Failed to load script from CDN. Check internet connection.`));
-    document.head.appendChild(script);
+    execFile(cmd, args, { timeout: 10000 }, (err, stdout, stderr) => {
+      if (err) {
+        (err as any).stderr = stderr;
+        reject(err);
+      } else {
+        resolve(stdout);
+      }
+    });
   });
 }
 
-function getPyodide(): Promise<PyodideInterface> {
-  if (window.__engineerPyodide) return window.__engineerPyodide;
-
-  // Hide the Node.js `process` global before loading Pyodide. Pyodide ≥ 0.26
-  // checks for `process` to detect Node.js/Electron and then tries to import
-  // `node:url` as an ES module, which fails in Obsidian's renderer process.
-  const savedProcess = (globalThis as any).process;
-
-  window.__engineerPyodide = (async () => {
+async function findPython(): Promise<string> {
+  if (cachedPython !== undefined) {
+    if (cachedPython === null) throw new Error(
+      "Python 3 not found on PATH.\n" +
+      "Install Python (python.org) and ensure 'python' or 'python3' is on your system PATH."
+    );
+    return cachedPython;
+  }
+  // On Windows, try "python" first (the Store app redirects if absent),
+  // then the universal "py" launcher, then "python3".
+  const isWin = process.platform === "win32";
+  const candidates = isWin ? ["python", "py", "python3"] : ["python3", "python"];
+  for (const cmd of candidates) {
     try {
-      (globalThis as any).process = undefined;
-      await loadScript(PYODIDE_CDN);
-      if (!window.loadPyodide) throw new Error("loadPyodide not found after script load");
-      return await window.loadPyodide({ indexURL: PYODIDE_INDEX_URL });
-    } finally {
-      (globalThis as any).process = savedProcess;
-    }
-  })().catch(err => {
-    delete window.__engineerPyodide; // clear so next Run attempt retries cleanly
-    throw err;
-  });
-
-  return window.__engineerPyodide;
+      const out = await execAsync(cmd, ["--version"]);
+      if (out.includes("Python 3") || out.includes("Python 2") === false) {
+        cachedPython = cmd;
+        return cmd;
+      }
+    } catch { /* try next */ }
+  }
+  cachedPython = null;
+  throw new Error(
+    "Python 3 not found on PATH.\n" +
+    "Install Python (python.org) and ensure 'python' or 'python3' is on your system PATH."
+  );
 }
 
-// ─── Renderer ─────────────────────────────────────────────────────────────────
+// ─── Runner ───────────────────────────────────────────────────────────────────
+
+function runScript(python: string, scriptPath: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(python, [scriptPath], { timeout: 60000 }, (err, stdout, stderr) => {
+      if (err) {
+        const out = (err as any);
+        out.stdout = stdout;
+        out.stderr = stderr;
+        reject(out);
+      } else {
+        resolve(stdout);
+      }
+    });
+  });
+}
+
+// ─── Engine ───────────────────────────────────────────────────────────────────
 
 export class PythonEngine {
   private store: VariableStore;
+  tagResolver?: TagResolver;
 
   constructor(store: VariableStore) {
     this.store = store;
@@ -108,27 +119,23 @@ export class PythonEngine {
   render(source: string, el: HTMLElement, ctx: MarkdownPostProcessorContext): void {
     const container = el.createDiv({ cls: "eng-python-container" });
 
-    // ── Toolbar ──
     const toolbar = container.createDiv({ cls: "eng-python-toolbar" });
     const runBtn  = toolbar.createEl("button", { cls: "eng-python-run-btn", text: "▶ Run" });
-    toolbar.createSpan({ cls: "eng-python-label", text: "Python · Pyodide" });
+    toolbar.createSpan({ cls: "eng-python-label", text: "Python" });
 
-    // ── Code display ──
-    const pre  = container.createEl("pre",  { cls: "eng-python-pre" });
-    const code = pre.createEl("code", { cls: "eng-python-code", text: source });
+    const pre = container.createEl("pre", { cls: "eng-python-pre" });
+    pre.createEl("code", { cls: "eng-python-code", text: source });
 
-    // ── Output area (hidden until run) ──
     const outputWrap = container.createDiv({ cls: "eng-python-output-wrap" });
     outputWrap.style.display = "none";
+    const outputPre   = outputWrap.createEl("pre", { cls: "eng-python-output" });
+    const exportTable = outputWrap.createDiv({ cls: "eng-python-export-table" });
 
-    const outputLabel  = outputWrap.createDiv({ cls: "eng-python-output-label", text: "Output" });
-    const outputPre    = outputWrap.createEl("pre", { cls: "eng-python-output" });
-    const exportTable  = outputWrap.createDiv({ cls: "eng-python-export-table" });
-
-    runBtn.onclick = () => this.run(source, ctx.sourcePath, runBtn, outputWrap, outputPre, exportTable);
+    runBtn.onclick = () =>
+      this.execute(source, ctx.sourcePath, runBtn, outputWrap, outputPre, exportTable);
   }
 
-  private async run(
+  private async execute(
     source: string,
     sourcePath: string,
     runBtn: HTMLButtonElement,
@@ -139,89 +146,160 @@ export class PythonEngine {
     runBtn.disabled = true;
     runBtn.textContent = "⏳ Running…";
     outputWrap.style.display = "";
-    outputPre.textContent = "Loading Python runtime…";
+    outputPre.textContent = "";
+    outputPre.removeClass("eng-python-error");
     exportTable.empty();
 
-    let pyodide: PyodideInterface;
+    // Find Python
+    let python: string;
     try {
-      pyodide = await getPyodide();
+      python = await findPython();
     } catch (err) {
-      outputPre.textContent = `Error: ${String(err)}`;
+      outputPre.textContent = String(err);
       outputPre.addClass("eng-python-error");
       runBtn.disabled = false;
       runBtn.textContent = "▶ Run";
       return;
     }
 
-    // Inject visible store variables as Python globals
-    const allVars = this.store.getAll(sourcePath);
-    for (const [key, val] of Object.entries(allVars)) {
+    // Parse # export: or # export(scope): directive
+    // Examples:  # export: delta, sigma_max
+    //            # export(folder): delta, sigma_max
+    //            # export(tag:project:pr1): delta
+    const exportMatch = source.match(/^#\s*export(?:\(([^)]*)\))?\s*:\s*(.+)$/m);
+    const exportNames = exportMatch
+      ? exportMatch[2].split(",").map(s => s.trim()).filter(Boolean)
+      : [];
+    const rawExportScope = exportMatch?.[1]?.trim().toLowerCase() ?? "global";
+    let exportVis: VariableVisibility = "global";
+    let exportScopeTag: string | undefined;
+    if (rawExportScope === "folder") {
+      exportVis = "folder";
+    } else if (rawExportScope.startsWith("tag:")) {
+      exportVis = "tag";
+      exportScopeTag = rawExportScope.slice(4);
+    }
+
+    // Temp file paths
+    const id         = `obsidian_eng_${Date.now()}`;
+    const tmpScript  = nodePath.join(os.tmpdir(), `${id}.py`);
+    const tmpExports = nodePath.join(os.tmpdir(), `${id}_out.json`);
+
+    // Build variable injection preamble — scope-aware so tag/folder vars are correctly resolved
+    const storeVars = this.store.getAll(sourcePath, this.tagResolver);
+    const preamble = Object.entries(storeVars)
+      .filter(([k]) => /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(k))
+      .map(([k, v]) => {
+        if (typeof v === "string")  return `${k} = ${JSON.stringify(v)}`;
+        if (typeof v === "boolean") return `${k} = ${v ? "True" : "False"}`;
+        if (typeof v === "number")  return `${k} = ${isFinite(v) ? v : (v > 0 ? "float('inf')" : "float('-inf')")}`;
+        if (Array.isArray(v))       return `${k} = ${JSON.stringify(v)}`;
+        return null;
+      })
+      .filter((l): l is string => l !== null)
+      .join("\n");
+
+    // Build export postamble
+    const exportedJsonPath = tmpExports.replace(/\\/g, "\\\\");
+    const postamble = exportNames.length > 0
+      ? [
+          "",
+          "# --- engineer: export ---",
+          "import json as __eng_json__",
+          `__eng_names__ = [${exportNames.map(n => JSON.stringify(n)).join(", ")}]`,
+          "__eng_out__ = {}",
+          "for __eng_k__ in __eng_names__:",
+          "    __eng_v__ = locals().get(__eng_k__, globals().get(__eng_k__))",
+          "    if __eng_v__ is not None:",
+          "        try: __eng_out__[__eng_k__] = float(__eng_v__)",
+          "        except: __eng_out__[__eng_k__] = str(__eng_v__)",
+          `with open('${exportedJsonPath}', 'w') as __eng_f__:`,
+          "    __eng_json__.dump(__eng_out__, __eng_f__)",
+        ].join("\n")
+      : "";
+
+    const fullScript = [preamble, "", source, postamble].join("\n");
+
+    // Write script
+    try {
+      fs.writeFileSync(tmpScript, fullScript, "utf8");
+    } catch (err) {
+      outputPre.textContent = `Failed to write temp file: ${String(err)}`;
+      outputPre.addClass("eng-python-error");
+      runBtn.disabled = false;
+      runBtn.textContent = "▶ Run";
+      return;
+    }
+
+    // Run
+    let stdout = "";
+    let success = false;
+    try {
+      stdout = await runScript(python, tmpScript);
+      success = true;
+    } catch (err: any) {
+      const out    = (err.stdout ?? "").trim();
+      const errMsg = (err.stderr ?? String(err.message ?? err)).trim();
+      outputPre.textContent = [out, errMsg].filter(Boolean).join("\n");
+      outputPre.addClass("eng-python-error");
+    }
+
+    if (success) {
+      outputPre.textContent = stdout.trim() || "(no output)";
+    }
+
+    // On a successful run, clean up any variables previously exported by this block
+    // that are no longer in the export list (covers removed or renamed exports).
+    if (success) {
+      const prevExported = this.store.getAllEntries()
+        .filter(e => e.entry.source === sourcePath && e.entry.block === "python")
+        .map(e => e.key);
+      const nowExported = new Set(exportNames);
+      for (const name of prevExported) {
+        if (!nowExported.has(name)) this.store.delete(name, sourcePath);
+      }
+    }
+
+    // Read and store exports
+    if (success && exportNames.length > 0) {
       try {
-        if (typeof val === "number" || typeof val === "string" || typeof val === "boolean") {
-          pyodide.globals.set(key, val);
-        }
-      } catch { /* skip non-serializable */ }
-    }
-
-    // Capture stdout / stderr
-    const lines: string[] = [];
-    pyodide.setStdout({ batched: (msg) => lines.push(msg) });
-    pyodide.setStderr({ batched: (msg) => lines.push(`[stderr] ${msg}`) });
-
-    try {
-      await pyodide.runPythonAsync(source);
-    } catch (err) {
-      outputPre.textContent = lines.join("\n") + (lines.length ? "\n" : "") + String(err);
-      outputPre.addClass("eng-python-error");
-      runBtn.disabled = false;
-      runBtn.textContent = "▶ Run";
-      return;
-    }
-
-    outputPre.textContent = lines.join("\n") || "(no output)";
-    outputPre.removeClass("eng-python-error");
-
-    // Handle # export: directive
-    const exportMatch = source.match(/^#\s*export:\s*(.+)$/m);
-    if (exportMatch) {
-      const names = exportMatch[1].split(",").map(s => s.trim()).filter(Boolean);
-      const exported: { name: string; value: unknown }[] = [];
-
-      for (const name of names) {
-        try {
-          const val = pyodide.globals.get(name);
-          if (val !== undefined) {
-            const primitive = typeof val === "number" || typeof val === "string" || typeof val === "boolean"
-              ? val
-              : Number(val);
-            this.store.set(name, primitive, undefined, sourcePath, "python", "global");
-            exported.push({ name, value: primitive });
+        const raw: Record<string, unknown> = JSON.parse(fs.readFileSync(tmpExports, "utf8"));
+        const rows: { name: string; value: unknown }[] = [];
+        for (const name of exportNames) {
+          const val = raw[name];
+          if (val !== undefined && val !== null) {
+            const num = Number(val);
+            const primitive = isNaN(num) ? String(val) : num;
+            this.store.set(name, primitive, undefined, sourcePath, "python", "global", exportVis, exportScopeTag);
+            rows.push({ name, value: primitive });
           }
-        } catch { /* skip */ }
-      }
+        }
+        if (rows.length > 0) this.renderExportTable(exportTable, rows);
+      } catch { /* no exports or parse error */ }
+    }
 
-      if (exported.length > 0) {
-        this.renderExportTable(exportTable, exported);
-      }
+    // Cleanup
+    for (const f of [tmpScript, tmpExports]) {
+      try { fs.unlinkSync(f); } catch { /* ignore */ }
     }
 
     runBtn.disabled = false;
     runBtn.textContent = "▶ Run";
   }
 
-  private renderExportTable(el: HTMLElement, exports: { name: string; value: unknown }[]): void {
+  private renderExportTable(el: HTMLElement, rows: { name: string; value: unknown }[]): void {
     el.empty();
-    const label = el.createDiv({ cls: "eng-python-export-label", text: "Exported to store" });
+    el.createDiv({ cls: "eng-python-export-label", text: "Exported to store" });
     const table = el.createEl("table", { cls: "eng-python-vars-table" });
-    for (const { name, value } of exports) {
+    for (const { name, value } of rows) {
       const tr = table.createEl("tr");
-      tr.createEl("td", { cls: "eng-python-var-name", text: name });
-      tr.createEl("td", { cls: "eng-python-var-value", text: formatPyValue(value) });
+      tr.createEl("td", { cls: "eng-python-var-name",  text: name });
+      tr.createEl("td", { cls: "eng-python-var-value", text: formatVal(value) });
     }
   }
 }
 
-function formatPyValue(v: unknown): string {
+function formatVal(v: unknown): string {
   if (typeof v === "number") {
     if (!isFinite(v)) return v > 0 ? "∞" : "-∞";
     const abs = Math.abs(v);

@@ -30,7 +30,7 @@
 
 import { Plugin } from "obsidian";
 
-export type VariableVisibility = "global" | "folder" | "tag" | "local" | "block";
+export type VariableVisibility = "global" | "folder" | "tag" | "file" | "block";
 
 export interface VariableEntry {
   value: unknown;
@@ -161,7 +161,7 @@ export class VariableStore {
     switch (vis) {
       case "global": return true;
       case "block":  return false;
-      case "local":  return requestingFile === entry.source;
+      case "file":   return requestingFile === entry.source;
       case "folder": {
         if (!requestingFile) return false;
         const reqFolder = requestingFile.includes("/")
@@ -176,9 +176,8 @@ export class VariableStore {
       }
       case "tag": {
         if (!requestingFile || !entry.scopeTag || !tagResolver) return false;
-        const reqTags = tagResolver(requestingFile);
-        const srcTags = tagResolver(entry.source);
-        return reqTags.includes(entry.scopeTag) && srcTags.includes(entry.scopeTag);
+        // Only the requesting file needs the tag — the source file's tags are irrelevant.
+        return tagResolver(requestingFile).includes(entry.scopeTag);
       }
       default: return true;
     }
@@ -200,7 +199,7 @@ export class VariableStore {
     const sourcePath = source ?? "unknown";
     const inferredScope = scope ?? this.inferScope(key);
     const inferredVisibility: VariableVisibility =
-      visibility ?? (inferredScope === "local" ? "local" : inferredScope === "block" ? "block" : "global");
+      visibility ?? (inferredScope === "local" ? "file" : inferredScope === "block" ? "block" : "global");
     const derivedFolder = sourcePath.includes("/")
       ? sourcePath.substring(0, sourcePath.lastIndexOf("/"))
       : "";

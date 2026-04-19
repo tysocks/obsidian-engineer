@@ -13,7 +13,7 @@
 
 import {
   Plugin, TFile, MarkdownView, Notice, addIcon,
-  App, PluginSettingTab, Setting,
+  App, PluginSettingTab, Setting, Editor, Modal,
 } from "obsidian";
 
 import { VariableStore } from "./VariableStore";
@@ -28,6 +28,7 @@ interface EngineerPluginSettings {
   defaultSigFigs: number;
   showUnitsInMath: boolean;
   parseOnStartup: boolean;
+  panelShowActiveNoteSection: boolean;
   panelShowLocalSection: boolean;
   panelShowFolderSection: boolean;
   panelShowParentFolderSection: boolean;
@@ -36,10 +37,11 @@ interface EngineerPluginSettings {
 }
 
 const DEFAULT_SETTINGS: EngineerPluginSettings = {
-  autosaveIntervalSeconds: 30,
+  autosaveIntervalSeconds: 150,
   defaultSigFigs: 4,
   showUnitsInMath: true,
   parseOnStartup: true,
+  panelShowActiveNoteSection: true,
   panelShowLocalSection: true,
   panelShowFolderSection: true,
   panelShowParentFolderSection: true,
@@ -76,7 +78,7 @@ export default class EngineerPlugin extends Plugin {
     // Register .engsheet file type and view
     this.registerView(
       ENGSHEET_VIEW_TYPE,
-      (leaf) => new EngSheetView(leaf, this.store)
+      (leaf) => new EngSheetView(leaf, this.store, tagResolver)
     );
     this.registerExtensions([ENGSHEET_EXTENSION], ENGSHEET_VIEW_TYPE);
 
@@ -100,14 +102,38 @@ export default class EngineerPlugin extends Plugin {
     const tagResolver = (filePath: string): string[] => {
       const cache = this.app.metadataCache.getCache(filePath);
       if (!cache) return [];
+
+      // Standard Obsidian tags: tags: [structural] in frontmatter and #inline tags
       const fmTags: string[] = cache.frontmatter?.tags
         ? (Array.isArray(cache.frontmatter.tags) ? cache.frontmatter.tags : [cache.frontmatter.tags])
         : [];
       const inlineTags = (cache.tags ?? []).map((t) => t.tag.replace(/^#/, ""));
-      return [...new Set([...fmTags, ...inlineTags])];
+
+      // Frontmatter properties as virtual "key:value" tags.
+      // This lets you scope variables to files with e.g. `project: pr1`
+      // in frontmatter using `tag:project:pr1` in the ---vars block.
+      const fmProps: string[] = [];
+      const SKIP_KEYS = new Set(["tags", "aliases", "cssclass", "cssClasses", "position"]);
+      if (cache.frontmatter) {
+        for (const [k, v] of Object.entries(cache.frontmatter)) {
+          if (SKIP_KEYS.has(k)) continue;
+          if (typeof v === "string" || typeof v === "number") {
+            fmProps.push(`${k}:${v}`);
+          }
+        }
+      }
+
+      return [...new Set([...fmTags, ...inlineTags, ...fmProps])];
     };
 
+    // Share the resolver with both the math engine and vars parser
+    // so tag-scoped variables are correctly resolved everywhere.
+    this.mathEngine.tagResolver = tagResolver;
+    this.varsParser.tagResolver = tagResolver;
+    this.pythonEngine.tagResolver = tagResolver;
+
     const getPanelConfig = () => ({
+      showActiveNoteSection: this.settings.panelShowActiveNoteSection,
       showLocalSection: this.settings.panelShowLocalSection,
       showFolderSection: this.settings.panelShowFolderSection,
       showParentFolderSection: this.settings.panelShowParentFolderSection,
@@ -120,12 +146,20 @@ export default class EngineerPlugin extends Plugin {
       (leaf) => new VariablePanel(leaf, this.store, tagResolver, getPanelConfig)
     );
 
-    addIcon("engineer-sigma",
-      `<svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
-        <text y=".9em" font-size="90" font-family="serif">Σ</text>
-       </svg>`
+    // {x} icon — braces with variable cross. addIcon wraps content in <svg viewBox="0 0 100 100">
+    // so pass inner <g> scaled from the 24×24 design coords (scale = 100/24 ≈ 4.167).
+    addIcon("engineer-var",
+      `<g transform="scale(4.167)" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M8 3H7a2 2 0 0 0-2 2v5a2 2 0 0 1-2 2 2 2 0 0 1 2 2v5c0 1.1.9 2 2 2h1"/>
+        <path d="M16 21h1a2 2 0 0 0 2-2v-5c0-1.1.9-2 2-2a2 2 0 0 1-2-2V5a2 2 0 0 0-2-2h-1"/>
+        <line x1="10" y1="9" x2="14" y2="15"/>
+        <line x1="14" y1="9" x2="10" y2="15"/>
+      </g>`
     );
-    this.addRibbonIcon("engineer-sigma", "Open Variable Store", () => this.activateVariablePanel());
+    this.addRibbonIcon("engineer-var", "Open Variable Store", () => this.activateVariablePanel());
+    this.addRibbonIcon("table", "New engineering spreadsheet", () => {
+      this.app.commands.executeCommandById("obsidian-engineer:new-engsheet");
+    });
 
     // Re-parse and re-cache when any markdown file is saved
     this.registerEvent(
@@ -144,6 +178,19 @@ export default class EngineerPlugin extends Plugin {
           this.store.clearFromSource(file.path);
           this.mathEngine.fileSourceCache.delete(file.path);
         }
+      })
+    );
+
+    // Right-click in editor → "Insert variable definition"
+    this.registerEvent(
+      this.app.workspace.on("editor-menu", (menu, editor: Editor, view) => {
+        if (!(view instanceof MarkdownView)) return;
+        menu.addItem((item) =>
+          item
+            .setTitle("Insert variable definition")
+            .setIcon("plus-square")
+            .onClick(() => new InsertVarModal(this.app, editor).open())
+        );
       })
     );
 
@@ -254,7 +301,7 @@ class EngineerSettingsTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Auto-save interval")
       .setDesc("How often (in seconds) the variable store is saved to disk. 0 = on unload only.")
-      .addText(text => text.setPlaceholder("30")
+      .addText(text => text.setPlaceholder("150")
         .setValue(String(this.plugin.settings.autosaveIntervalSeconds))
         .onChange(async value => {
           const n = parseInt(value);
@@ -280,11 +327,12 @@ class EngineerSettingsTab extends PluginSettingTab {
     });
 
     const panelToggles: Array<{ name: string; desc: string; key: keyof EngineerPluginSettings }> = [
-      { name: "This note (local)", desc: "Variables scoped to the active note only.", key: "panelShowLocalSection" },
-      { name: "This folder", desc: "Variables scoped to the active note's folder.", key: "panelShowFolderSection" },
-      { name: "Parent folders", desc: "Variables scoped to ancestor folders.", key: "panelShowParentFolderSection" },
-      { name: "Tagged", desc: "Variables visible via shared frontmatter tags.", key: "panelShowTagSection" },
-      { name: "Global", desc: "Variables visible to all notes in the vault.", key: "panelShowGlobalSection" },
+      { name: "Show Active Note section", desc: "All variables defined by the active file, regardless of their scope.", key: "panelShowActiveNoteSection" },
+      { name: "Show File section",   desc: "Variables scoped to the active note only (# file).", key: "panelShowLocalSection" },
+      { name: "Show Folder section", desc: "Variables scoped to the active note's folder (# folder or # folder:path).", key: "panelShowFolderSection" },
+      { name: "Show Path section",   desc: "Variables scoped to ancestor folders of the active note.", key: "panelShowParentFolderSection" },
+      { name: "Show Tag section",    desc: "Variables visible via shared frontmatter tags (# tag:tagname).", key: "panelShowTagSection" },
+      { name: "Show Global section", desc: "Variables visible to all notes in the vault (default).", key: "panelShowGlobalSection" },
     ];
 
     for (const { name, desc, key } of panelToggles) {
@@ -323,4 +371,136 @@ class EngineerSettingsTab extends PluginSettingTab {
         new Notice("Engineer: Variable store cleared.");
       }));
   }
+}
+
+// ─── Insert Variable Modal ────────────────────────────────────────────────────
+
+class InsertVarModal extends Modal {
+  private editor: Editor;
+
+  constructor(app: App, editor: Editor) {
+    super(app);
+    this.editor = editor;
+  }
+
+  onOpen(): void {
+    const { contentEl } = this;
+    contentEl.addClass("eng-insert-var-modal");
+    contentEl.createEl("h3", { text: "Insert variable definition" });
+
+    const grid = contentEl.createDiv({ cls: "eng-modal-grid" });
+
+    const mkRow = (label: string, placeholder: string, required = false): HTMLInputElement => {
+      const row = grid.createDiv({ cls: "eng-modal-row" });
+      row.createEl("label", { text: label, cls: "eng-modal-label" });
+      const input = row.createEl("input", {
+        cls: "eng-modal-input",
+        attr: { type: "text", placeholder },
+      }) as HTMLInputElement;
+      if (required) input.required = true;
+      return input;
+    };
+
+    const nameInput  = mkRow("Name",          "E",           true);
+    const valueInput = mkRow("Value",         "200e9",       true);
+    const unitInput  = mkRow("Unit",          "Pa");
+
+    // Scope dropdown
+    const scopeRow = grid.createDiv({ cls: "eng-modal-row" });
+    scopeRow.createEl("label", { text: "Scope", cls: "eng-modal-label" });
+    const scopeSelect = scopeRow.createEl("select", { cls: "eng-modal-input" }) as HTMLSelectElement;
+    [
+      ["global",  "Global (default — visible everywhere)"],
+      ["folder",  "Folder (same folder)"],
+      ["file",    "File (this note only)"],
+      ["tag",     "Tag (shared tag)"],
+    ].forEach(([val, text]) => {
+      const opt = scopeSelect.createEl("option", { value: val, text });
+      if (val === "global") opt.selected = true;
+    });
+
+    // Dynamic extra input: folder path or tag name
+    const extraRow = grid.createDiv({ cls: "eng-modal-row eng-modal-extra-row" });
+    extraRow.style.display = "none";
+    const extraLabel = extraRow.createEl("label", { cls: "eng-modal-label" });
+    const extraInput = extraRow.createEl("input", {
+      cls: "eng-modal-input",
+      attr: { type: "text" },
+    }) as HTMLInputElement;
+
+    const updateExtraRow = () => {
+      const scope = scopeSelect.value;
+      if (scope === "folder") {
+        extraLabel.textContent = "Path (optional)";
+        (extraInput as HTMLInputElement).placeholder = "projects/bridge";
+        extraRow.style.display = "";
+      } else if (scope === "tag") {
+        extraLabel.textContent = "Tag name";
+        (extraInput as HTMLInputElement).placeholder = "structural";
+        extraRow.style.display = "";
+      } else {
+        extraRow.style.display = "none";
+        extraInput.value = "";
+      }
+    };
+    scopeSelect.onchange = updateExtraRow;
+
+    const footer = contentEl.createDiv({ cls: "eng-modal-footer" });
+    const insertBtn = footer.createEl("button", { text: "Insert", cls: "mod-cta" });
+    const cancelBtn = footer.createEl("button", { text: "Cancel" });
+
+    cancelBtn.onclick = () => this.close();
+    insertBtn.onclick = () => {
+      const scope = scopeSelect.value;
+      const extra = extraInput.value.trim();
+      let resolvedScope = scope;
+      if (scope === "folder" && extra) resolvedScope = `folder:${extra}`;
+      else if (scope === "tag" && extra) resolvedScope = `tag:${extra}`;
+      else if (scope === "tag") resolvedScope = "tag:";
+      this.insert(nameInput.value.trim(), valueInput.value.trim(), unitInput.value.trim(), resolvedScope);
+    };
+
+    // Allow Enter to submit
+    contentEl.onkeydown = (e) => { if (e.key === "Enter") insertBtn.click(); };
+    setTimeout(() => nameInput.focus(), 50);
+  }
+
+  private insert(name: string, value: string, unit: string, scope: string): void {
+    if (!name || !value) return;
+
+    // Build comment: unit and/or scope
+    const parts = [unit, scope !== "global" ? scope : ""].filter(Boolean);
+    const comment = parts.length ? `  # ${parts.join(", ")}` : "";
+    const line = `${name}: ${value}${comment}`;
+
+    const editor = this.editor;
+    const content = editor.getValue();
+    const cursor = editor.getCursor();
+
+    // Find whether cursor is already inside a ---vars block
+    const lines = content.split("\n");
+    let blockStart = -1, blockEnd = -1;
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].trimEnd() === "---vars") { blockStart = i; continue; }
+      if (blockStart >= 0 && blockEnd < 0 && lines[i].trimEnd() === "---") { blockEnd = i; break; }
+    }
+
+    const cursorInBlock = blockStart >= 0 && blockEnd >= 0 &&
+      cursor.line > blockStart && cursor.line < blockEnd;
+
+    if (cursorInBlock) {
+      // Insert at cursor line inside the block
+      editor.replaceRange(line + "\n", { line: cursor.line, ch: 0 });
+    } else if (blockStart >= 0 && blockEnd >= 0) {
+      // Append before the closing --- of the first block
+      editor.replaceRange(line + "\n", { line: blockEnd, ch: 0 });
+    } else {
+      // No block exists — insert a new one at the cursor
+      editor.replaceRange(`\n---vars\n${line}\n---\n`, cursor);
+    }
+
+    this.close();
+  }
+
+  onClose(): void { this.contentEl.empty(); }
 }

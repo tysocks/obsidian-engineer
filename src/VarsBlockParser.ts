@@ -42,8 +42,9 @@ import * as math from "mathjs";
 const VARS_BLOCK_REGEX = /(?:^|\n)---vars\s*\n([\s\S]*?)\n---/;
 const VAR_LINE_REGEX = /^([a-zA-Z_][a-zA-Z0-9_]*)\s*:\s*(.+?)(?:\s*#\s*(.*))?$/;
 
-const KNOWN_SCOPES: Array<{ keyword: RegExp; visibility: "global" | "local" | "folder" | "tag" }> = [
-  { keyword: /\blocal\b/i,  visibility: "local"  },
+const KNOWN_SCOPES: Array<{ keyword: RegExp; visibility: "global" | "file" | "folder" | "tag" }> = [
+  { keyword: /\bfile\b/i,   visibility: "file"   },
+  { keyword: /\blocal\b/i,  visibility: "file"   },  // backward-compatible alias
   { keyword: /\bfolder\b/i, visibility: "folder" },
   { keyword: /\btag\b/i,    visibility: "tag"    },
   { keyword: /\bglobal\b/i, visibility: "global" },
@@ -71,9 +72,12 @@ export interface ParseResult {
   errors: Array<{ line: string; message: string }>;
 }
 
+type TagResolver = (filePath: string) => string[];
+
 export class VarsBlockParser {
   private app: App;
   private store: VariableStore;
+  tagResolver?: TagResolver;
 
   constructor(app: App, store: VariableStore) {
     this.app = app;
@@ -91,9 +95,10 @@ export class VarsBlockParser {
 
     const lines = match[1].split("\n");
 
-    // Accumulating scope: later lines can reference earlier variables
+    // Accumulating scope: later lines can reference earlier variables.
+    // Pass tagResolver so tag-scoped vars from other files are available.
     const scope: Record<string, unknown> = {
-      ...this.store.getAll(filePath),
+      ...this.store.getAll(filePath, this.tagResolver),
     };
 
     let blockIndex = 0;
@@ -145,7 +150,7 @@ export class VarsBlockParser {
   }
 
   private extractScope(comment?: string): {
-    visibility: "global" | "local" | "folder" | "tag";
+    visibility: "global" | "file" | "folder" | "tag";
     scopeTag?: string;
     scopeFolder?: string;
   } {

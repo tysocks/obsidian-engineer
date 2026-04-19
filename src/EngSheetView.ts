@@ -33,14 +33,17 @@
  * Reading  →  =STORE("varname")
  *             Resolved to its current value before HyperFormula sees the formula.
  *
- * Writing  →  =EXPORT(expression, "varname")   or   =EXPORT(expr, "varname", "scope")
+ * Writing  →  =EXPORT(expression, "varname")
+ *             =EXPORT(expr, "varname", "scope")   scope: global (default), file, folder, tag
  *             The EXPORT wrapper is stripped before HF evaluation; after each
  *             recalculation the computed value is written to the Variable Store.
  *             Right-click → "Export cell…" wraps an existing formula automatically.
  */
 
 import { FileView, Menu, Notice, WorkspaceLeaf, TFile } from "obsidian";
-import { VariableStore } from "./VariableStore";
+import { VariableStore, VariableVisibility } from "./VariableStore";
+
+type TagResolver = (filePath: string) => string[];
 
 export const ENGSHEET_VIEW_TYPE = "engsheet-view";
 export const ENGSHEET_EXTENSION = "engsheet";
@@ -182,6 +185,7 @@ export class EngSheetView extends FileView {
   private editingCell: { r:number; c:number } | null = null;
   private isDirty = false;
   private storeListener: (() => void) | null = null;
+  private _suppressStoreListener = false;
   private clipboard: ClipboardData | null = null;
   private _saveTimer: ReturnType<typeof setTimeout> | null = null;
   private colResizing = false;
@@ -200,9 +204,12 @@ export class EngSheetView extends FileView {
   private theadEl!: HTMLTableSectionElement;
   private tbodyEl!: HTMLTableSectionElement;
 
-  constructor(leaf: WorkspaceLeaf, store: VariableStore) {
+  tagResolver?: TagResolver;
+
+  constructor(leaf: WorkspaceLeaf, store: VariableStore, tagResolver?: TagResolver) {
     super(leaf);
     this.store = store;
+    this.tagResolver = tagResolver;
   }
 
   getViewType() { return ENGSHEET_VIEW_TYPE; }
@@ -220,7 +227,11 @@ export class EngSheetView extends FileView {
     this.refreshAllCells(); // populates values
     this.updateSelection(); // applies highlight
     this.refreshFormulaBar();
-    this.storeListener = () => { this.rebuildHF(); this.refreshAllCells(); };
+    this.storeListener = () => {
+      if (this._suppressStoreListener) return;
+      this.rebuildHF();
+      this.refreshAllFormulaCells();
+    };
     this.store.on("change", this.storeListener);
   }
 
@@ -252,14 +263,14 @@ export class EngSheetView extends FileView {
     } | undefined;
     if (!HF) return;
     const sheet = this.currentSheet();
-    const data: (string | number | boolean | null)[][] = [];
-    for (let r = 0; r < sheet.numRows; r++) {
-      const row: (string | number | boolean | null)[] = [];
-      for (let c = 0; c < sheet.numCols; c++) {
-        const cell = sheet.cells[cellAddr(r,c)];
-        row.push(cell?.f ? this.resolveCustomFuncs(cell.f) : (cell?.v ?? null));
-      }
-      data.push(row);
+    // Pre-fill with nulls then patch only populated cells — avoids O(numRows×numCols) addr lookups
+    const data: (string | number | boolean | null)[][] =
+      Array.from({ length: sheet.numRows }, () => Array(sheet.numCols).fill(null) as (string|number|boolean|null)[]);
+    for (const [addr, cell] of Object.entries(sheet.cells)) {
+      if (!cell) continue;
+      const p = parseAddr(addr);
+      if (!p || p.row >= sheet.numRows || p.col >= sheet.numCols) continue;
+      data[p.row][p.col] = cell.f ? this.resolveCustomFuncs(cell.f) : (cell.v ?? null);
     }
     try {
       this.hf = HF.buildFromArray(data, { licenseKey: "gpl-v3" });
@@ -284,8 +295,9 @@ export class EngSheetView extends FileView {
   }
 
   private resolveCustomFuncs(formula: string): string {
+    const filePath = this.file?.path;
     let f = formula.replace(/STORE\s*\(\s*["']([^"']+)["']\s*\)/gi, (_m, name) => {
-      const val = this.store.get(name);
+      const val = this.store.get(name, filePath, this.tagResolver);
       if (val === undefined || val === null) return "0";
       if (typeof val === "number") return String(val);
       if (typeof val === "boolean") return val ? "TRUE" : "FALSE";
@@ -297,18 +309,48 @@ export class EngSheetView extends FileView {
   }
 
   private processExports(): void {
+    const filePath = this.file?.path ?? "unknown";
     const sheet = this.currentSheet();
-    for (const [addr, cell] of Object.entries(sheet.cells)) {
-      if (!cell?.f) continue;
-      const m = cell.f.match(/EXPORT\s*\(\s*[^,]+\s*,\s*["']([^"']+)["']\s*(?:,\s*["']([^"']*?)["']\s*)?\)/i);
-      if (!m) continue;
-      const p = parseAddr(addr);
-      if (!p) continue;
-      const value = this.getComputedValue(p.row, p.col);
-      if (value !== null && value !== undefined) {
-        this.store.set(m[1], value, undefined, this.file?.path ?? "unknown", "engsheet",
-          (m[2] ?? "global") as "global" | "local" | "folder" | "tag");
+
+    const prevExported = new Set<string>(
+      this.store.getAllEntries()
+        .filter(e => e.entry.source === filePath && e.entry.block === "engsheet")
+        .map(e => e.key)
+    );
+    const nowExported = new Set<string>();
+
+    this._suppressStoreListener = true;
+    try {
+      for (const [addr, cell] of Object.entries(sheet.cells)) {
+        if (!cell?.f) continue;
+        const m = cell.f.match(/EXPORT\s*\(\s*[^,]+\s*,\s*["']([^"']+)["']\s*(?:,\s*["']([^"']*?)["']\s*)?\)/i);
+        if (!m) continue;
+        // Mark alive before value check — cell still has EXPORT even if value is currently null
+        nowExported.add(m[1]);
+        const p = parseAddr(addr);
+        if (!p) continue;
+        const value = this.getComputedValue(p.row, p.col);
+        if (value !== null && value !== undefined) {
+          const rawScope = (m[2] ?? "global").trim();
+          const lower = rawScope.toLowerCase();
+          let vis: VariableVisibility = "global";
+          let explicitFolder: string | undefined;
+          if (lower.startsWith("folder:")) {
+            vis = "folder";
+            explicitFolder = rawScope.slice(7).trim() || undefined;
+          } else if (lower === "folder") {
+            vis = "folder";
+          } else if (lower === "tag") {
+            vis = "tag";
+          }
+          this.store.set(m[1], value, undefined, filePath, "engsheet", "global", vis, undefined, explicitFolder);
+        }
       }
+      for (const name of prevExported) {
+        if (!nowExported.has(name)) this.store.delete(name, filePath);
+      }
+    } finally {
+      this._suppressStoreListener = false;
     }
   }
 
@@ -1068,9 +1110,11 @@ export class EngSheetView extends FileView {
   /** Refresh only cells that have formulas (not plain values). */
   private refreshAllFormulaCells(): void {
     const sheet = this.currentSheet();
-    for (let r = 0; r < sheet.numRows; r++)
-      for (let c = 0; c < sheet.numCols; c++)
-        if (sheet.cells[cellAddr(r,c)]?.f) this.refreshCell(r,c);
+    for (const [addr, cell] of Object.entries(sheet.cells)) {
+      if (!cell?.f) continue;
+      const p = parseAddr(addr);
+      if (p) this.refreshCell(p.row, p.col);
+    }
     // Also refresh the edited cell even if it's now plain
     this.refreshCell(this.sel.r1, this.sel.c1);
   }

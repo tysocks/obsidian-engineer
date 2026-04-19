@@ -4,6 +4,7 @@ import {
   setIcon,
   TFile,
   MarkdownView,
+  FileView,
 } from "obsidian";
 import { VariableStore, VariableEntry, VariableVisibility } from "./VariableStore";
 
@@ -12,6 +13,7 @@ export const VARIABLE_PANEL_VIEW_TYPE = "engineer-variable-panel";
 type TagResolver = (filePath: string) => string[];
 
 export interface PanelConfig {
+  showActiveNoteSection: boolean;
   showLocalSection: boolean;
   showFolderSection: boolean;
   showParentFolderSection: boolean;
@@ -37,6 +39,7 @@ export class VariablePanel extends ItemView {
     this.store = store;
     this.tagResolver = tagResolver;
     this.getConfig = getConfig ?? (() => ({
+      showActiveNoteSection: true,
       showLocalSection: true,
       showFolderSection: true,
       showParentFolderSection: true,
@@ -54,7 +57,7 @@ export class VariablePanel extends ItemView {
   async onOpen(): Promise<void> {
     this.registerEvent(
       this.app.workspace.on("active-leaf-change", () => {
-        const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+        const view = this.app.workspace.getActiveViewOfType(FileView);
         const path = view?.file?.path ?? null;
         if (path !== this.activeFilePath) {
           this.activeFilePath = path;
@@ -62,7 +65,7 @@ export class VariablePanel extends ItemView {
         }
       })
     );
-    const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+    const view = this.app.workspace.getActiveViewOfType(FileView);
     this.activeFilePath = view?.file?.path ?? null;
     this.render();
   }
@@ -106,9 +109,14 @@ export class VariablePanel extends ItemView {
       this.store.isVisibleTo(entry, activePath, this.tagResolver)
     );
 
-    // Local: visibility=local AND source is the active file
+    // Active Note: ALL entries defined by the active file, regardless of scope
+    const activeNoteEntries = activePath
+      ? all.filter(({ entry }) => entry.source === activePath && this.fileExists(entry.source))
+      : [];
+
+    // Local: visibility=file AND source is the active file
     const localEntries = visible.filter(({ entry }) =>
-      entry.visibility === "local" && entry.source === activePath
+      entry.visibility === "file" && entry.source === activePath
     );
 
     // Folder (same level): visibility=folder AND scopeFolder === activeFolder
@@ -162,12 +170,15 @@ export class VariablePanel extends ItemView {
     if (applySearch(overrides).length > 0) {
       this.renderSection(container, "✏ User overrides", applySearch(overrides), "eng-section-override", true);
     }
+    if (cfg.showActiveNoteSection && applySearch(activeNoteEntries).length > 0) {
+      this.renderSection(container, "📝 Active Note", applySearch(activeNoteEntries), "eng-section-active-note", false);
+    }
     if (cfg.showLocalSection && applySearch(localEntries).length > 0) {
-      this.renderSection(container, "📄 This note", applySearch(localEntries), "eng-section-local", false);
+      this.renderSection(container, "📄 File", applySearch(localEntries), "eng-section-file", false);
     }
     if (cfg.showFolderSection && applySearch(folderEntries).length > 0) {
-      const folderLabel = activeFolder ? `📁 ${activeFolder.split("/").pop() ?? activeFolder}` : "📁 This folder";
-      this.renderSection(container, folderLabel, applySearch(folderEntries), "eng-section-folder", false);
+      const folderName = activeFolder ? (activeFolder.split("/").pop() ?? activeFolder) : "Folder";
+      this.renderSection(container, `📁 Folder · ${folderName}`, applySearch(folderEntries), "eng-section-folder", false);
     }
     if (cfg.showParentFolderSection && applySearch(parentFolderEntries).length > 0) {
       this.renderSectionByFolder(container, applySearch(parentFolderEntries));
@@ -256,7 +267,7 @@ export class VariablePanel extends ItemView {
     const section = container.createDiv({ cls: "eng-scope-section eng-section-parent-folder" });
     const hdr = section.createDiv({ cls: "eng-section-header" });
     const chevron = hdr.createSpan({ cls: "eng-chevron", text: "▾" });
-    hdr.createSpan({ cls: "eng-section-label", text: "📂 Parent folders" });
+    hdr.createSpan({ cls: "eng-section-label", text: "📂 Path" });
     hdr.createSpan({ cls: "eng-group-count", text: ` (${items.length})` });
 
     const body = section.createDiv({ cls: "eng-section-body" });
@@ -294,7 +305,7 @@ export class VariablePanel extends ItemView {
     const section = container.createDiv({ cls: "eng-scope-section eng-section-tag" });
     const hdr = section.createDiv({ cls: "eng-section-header" });
     const chevron = hdr.createSpan({ cls: "eng-chevron", text: "▾" });
-    hdr.createSpan({ cls: "eng-section-label", text: "🏷 Tagged" });
+    hdr.createSpan({ cls: "eng-section-label", text: "🏷 Tag" });
     hdr.createSpan({ cls: "eng-group-count", text: ` (${items.length})` });
 
     const body = section.createDiv({ cls: "eng-section-body" });
@@ -369,6 +380,7 @@ export class VariablePanel extends ItemView {
     });
     setIcon(addBtn, "plus-circle");
     addBtn.onclick = () => this.showAddDialog(container);
+
   }
 
   private renderSearch(container: HTMLElement): void {

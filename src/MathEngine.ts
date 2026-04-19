@@ -56,10 +56,13 @@ const SUBSTITUTION_REGEX = /<<([^<>]+?)>>/g;
 const DISPLAY_MATH_REGEX = /\$\$([\s\S]+?)\$\$/g;
 const INLINE_MATH_REGEX = /(?<!\$)\$(?!\$)([^$\n]+?)\$(?!\$)/g;
 
+type TagResolver = (filePath: string) => string[];
+
 export class MathEngine {
   private store: VariableStore;
   private plugin: Plugin;
   private rerenderTimer: ReturnType<typeof setTimeout> | null = null;
+  tagResolver?: TagResolver;
 
   /**
    * Cache of filePath → full file content.
@@ -207,7 +210,7 @@ export class MathEngine {
   ): { latex: string; assignments: Record<string, unknown> } {
     if (!latex.includes("<<")) return { latex, assignments: {} };
 
-    const scope = this.store.getAll(sourcePath) as Record<string, unknown>;
+    const scope = this.store.getAll(sourcePath, this.tagResolver) as Record<string, unknown>;
     const assignments: Record<string, unknown> = {};
 
     const result = latex.replace(SUBSTITUTION_REGEX, (_match, inner: string) => {
@@ -259,8 +262,21 @@ export class MathEngine {
     sourcePath: string
   ): void {
     for (const [key, value] of Object.entries(assignments)) {
-      const existingUnit = this.store.getEntry(key)?.unit;
-      this.store.set(key, value, existingUnit, sourcePath, "math-block");
+      // Look up the best entry visible from the source file.
+      // If there's a same-file ---vars pre-declaration (e.g. `delta: 0 # m, folder`),
+      // inherit its visibility, unit, and scopeTag so re-renders don't reset to global.
+      const existing = this.store.getEntry(key, sourcePath, this.tagResolver);
+      const fromSameFile = existing?.source === sourcePath;
+      this.store.set(
+        key, value,
+        existing?.unit,
+        sourcePath,
+        "math-block",
+        "global",
+        fromSameFile ? existing!.visibility : "global",
+        fromSameFile ? existing!.scopeTag   : undefined,
+        fromSameFile ? existing!.scopeFolder : undefined,
+      );
     }
   }
 
