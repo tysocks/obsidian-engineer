@@ -52,7 +52,7 @@ export class VariablePanel extends ItemView {
 
   getViewType(): string { return VARIABLE_PANEL_VIEW_TYPE; }
   getDisplayText(): string { return "Variable Store"; }
-  getIcon(): string { return "sigma"; }
+  getIcon(): string { return "engineer-var"; }
 
   async onOpen(): Promise<void> {
     this.registerEvent(

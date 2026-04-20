@@ -1,46 +1,32 @@
 /**
- * EngSheetView — interactive Excel-like spreadsheet for .engsheet files.
- *
- * PERFORMANCE DESIGN
- * ──────────────────
- * The grid is built ONCE on load (or sheet switch). On every cell edit, only
- * the affected cells are updated in-place — no full DOM rebuild. HyperFormula
- * is only re-instantiated when a formula cell changes; plain value edits just
- * update the cell display directly. Selection changes update only the cells
- * whose highlight state changes (previous selection → new selection diff).
+ * EngSheetView — modern Excel-like spreadsheet for .engsheet files.
  *
  * FILE FORMAT (.engsheet — JSON)
- * ─────────────────────────────
  * {
  *   "version": 1,
  *   "sheets": [{
  *     "name": "Sheet1",
  *     "cells": {
- *       "A1": { "v": "Label",  "f": null, "style": { "bold": true } },
- *       "B1": { "v": null,     "f": "=STORE(\"E\")" },
- *       "C1": { "v": null,     "f": "=EXPORT(B1*2, \"double_E\")" }
+ *       "A1": { "v": "Label", "f": null, "style": { "bold": true } },
+ *       "B1": { "v": null, "f": "=STORE(\"E\")" },
+ *       "C1": { "v": null, "f": "=EXPORT(B1*2, \"double_E\")" }
  *     },
  *     "colWidths": { "0": 120 },
  *     "rowHeights": {},
- *     "numRows": 50,
- *     "numCols": 26
+ *     "numRows": 20,
+ *     "numCols": 10,
+ *     "frozen": { "rows": 0, "cols": 0 }
  *   }],
  *   "meta": {}
  * }
  *
  * VARIABLE STORE INTEGRATION
- * ──────────────────────────
  * Reading  →  =STORE("varname")
- *             Resolved to its current value before HyperFormula sees the formula.
- *
  * Writing  →  =EXPORT(expression, "varname")
- *             =EXPORT(expr, "varname", "scope")   scope: global (default), file, folder, tag
- *             The EXPORT wrapper is stripped before HF evaluation; after each
- *             recalculation the computed value is written to the Variable Store.
- *             Right-click → "Export cell…" wraps an existing formula automatically.
+ *             =EXPORT(expr, "varname", "scope")   scope: global (default), folder, folder:path, tag
  */
 
-import { FileView, Menu, Notice, WorkspaceLeaf, TFile } from "obsidian";
+import { FileView, Menu, Notice, WorkspaceLeaf, TFile, setIcon } from "obsidian";
 import { VariableStore, VariableVisibility } from "./VariableStore";
 
 type TagResolver = (filePath: string) => string[];
@@ -54,10 +40,12 @@ interface CellStyle {
   bold?: boolean;
   italic?: boolean;
   underline?: boolean;
+  wrap?: boolean;
   align?: "left" | "center" | "right";
   color?: string;
   bg?: string;
   format?: string;
+  border?: "all" | "outer" | "none";
 }
 
 interface CellData {
@@ -73,6 +61,7 @@ interface SheetData {
   rowHeights: Record<number, number>;
   numRows: number;
   numCols: number;
+  frozen?: { rows: number; cols: number };
 }
 
 interface EngSheetFile {
@@ -82,8 +71,8 @@ interface EngSheetFile {
 }
 
 interface Selection {
-  r0: number; c0: number;  // anchor
-  r1: number; c1: number;  // active
+  r0: number; c0: number;
+  r1: number; c1: number;
 }
 
 interface ClipboardData {
@@ -95,12 +84,22 @@ interface ClipboardData {
   selC0?: number; selC1?: number;
 }
 
+interface UndoChange {
+  r: number; c: number; sheetIdx: number;
+  before: CellData | undefined;
+  after: CellData | undefined;
+}
+
+interface UndoEntry {
+  changes: UndoChange[];
+}
+
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-const DEFAULT_COL_W = 150;
-const DEFAULT_ROW_H = 22;
-const ROW_HDR_W     = 40;
-const COL_HDR_H     = 22;
+const DEFAULT_COL_W = 120;
+const DEFAULT_ROW_H = 24;
+const ROW_HDR_W     = 44;
+const COL_HDR_H     = 24;
 const DEFAULT_ROWS  = 20;
 const DEFAULT_COLS  = 10;
 
@@ -152,23 +151,23 @@ function applyFormat(value: unknown, fmt?: string): string {
     if (abs >= 1e6 || (abs < 1e-3 && abs > 0)) return value.toExponential(3);
     return parseFloat(value.toPrecision(6)).toString();
   }
-  if (f === "0")          return Math.round(value).toString();
-  if (f === "0.0")        return value.toFixed(1);
-  if (f === "0.00")       return value.toFixed(2);
-  if (f === "0.000")      return value.toFixed(3);
-  if (f === "0.0000")     return value.toFixed(4);
-  if (f === "0.00000")    return value.toFixed(5);
-  if (f === "0.00E+00")   return value.toExponential(2);
-  if (f === "0.000E+00")  return value.toExponential(3);
-  if (f === "#,##0")      return Math.round(value).toLocaleString();
-  if (f === "#,##0.00")   return value.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
-  if (f === "0%")         return (value*100).toFixed(0)+"%";
-  if (f === "0.00%")      return (value*100).toFixed(2)+"%";
+  if (f === "0")         return Math.round(value).toString();
+  if (f === "0.0")       return value.toFixed(1);
+  if (f === "0.00")      return value.toFixed(2);
+  if (f === "0.000")     return value.toFixed(3);
+  if (f === "0.0000")    return value.toFixed(4);
+  if (f === "0.00000")   return value.toFixed(5);
+  if (f === "0.00E+00")  return value.toExponential(2);
+  if (f === "0.000E+00") return value.toExponential(3);
+  if (f === "#,##0")     return Math.round(value).toLocaleString();
+  if (f === "#,##0.00")  return value.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
+  if (f === "0%")        return (value*100).toFixed(0)+"%";
+  if (f === "0.00%")     return (value*100).toFixed(2)+"%";
   return value.toString();
 }
 
 function emptySheet(name = "Sheet1"): SheetData {
-  return { name, cells:{}, colWidths:{}, rowHeights:{}, numRows: DEFAULT_ROWS, numCols: DEFAULT_COLS };
+  return { name, cells:{}, colWidths:{}, rowHeights:{}, numRows:DEFAULT_ROWS, numCols:DEFAULT_COLS, frozen:{rows:0,cols:0} };
 }
 function emptyFile(): EngSheetFile {
   return { version:1, sheets:[emptySheet()], meta:{} };
@@ -190,8 +189,14 @@ export class EngSheetView extends FileView {
   private _saveTimer: ReturnType<typeof setTimeout> | null = null;
   private colResizing = false;
   private hf: unknown = null;
+  private activeRibbonTab: "home" | "data" | "view" = "home";
+  private fillHandleEl: HTMLElement | null = null;
+  private fillPreviewCells: HTMLTableCellElement[] = [];
+  private undoStack: UndoEntry[] = [];
+  private redoStack: UndoEntry[] = [];
+  private _batchEntry: UndoEntry | null = null;
 
-  // Cached cell references — avoids re-querying DOM on every update
+  // Cached cell DOM references
   private cellEls: HTMLTableCellElement[][] = [];
 
   // DOM refs
@@ -203,6 +208,9 @@ export class EngSheetView extends FileView {
   private tableEl!: HTMLTableElement;
   private theadEl!: HTMLTableSectionElement;
   private tbodyEl!: HTMLTableSectionElement;
+  private statusLeftEl!: HTMLElement;
+  private statusInfoEl!: HTMLElement;
+  private ribbonPanels: Partial<Record<string, HTMLElement>> = {};
 
   tagResolver?: TagResolver;
 
@@ -223,10 +231,11 @@ export class EngSheetView extends FileView {
     await this.readFileData(file);
     this.buildUI();
     this.rebuildHF();
-    this.buildGrid();     // builds DOM once
-    this.refreshAllCells(); // populates values
-    this.updateSelection(); // applies highlight
+    this.buildGrid();
+    this.refreshAllCells();
+    this.updateSelection();
     this.refreshFormulaBar();
+    this.updateStatusBar();
     this.storeListener = () => {
       if (this._suppressStoreListener) return;
       this.rebuildHF();
@@ -244,7 +253,7 @@ export class EngSheetView extends FileView {
     if (this.storeListener) this.store.off("change", this.storeListener);
   }
 
-  // ─── HyperFormula ───────────────────────────────────────────────────────────
+  // ─── HyperFormula ────────────────────────────────────────────────────────────
 
   private async loadHyperFormula(): Promise<void> {
     if ((window as Record<string, unknown>).HyperFormula) return;
@@ -263,7 +272,6 @@ export class EngSheetView extends FileView {
     } | undefined;
     if (!HF) return;
     const sheet = this.currentSheet();
-    // Pre-fill with nulls then patch only populated cells — avoids O(numRows×numCols) addr lookups
     const data: (string | number | boolean | null)[][] =
       Array.from({ length: sheet.numRows }, () => Array(sheet.numCols).fill(null) as (string|number|boolean|null)[]);
     for (const [addr, cell] of Object.entries(sheet.cells)) {
@@ -278,11 +286,6 @@ export class EngSheetView extends FileView {
     this.processExports();
   }
 
-  /**
-   * Lightweight HF update for a single cell — avoids full rebuild when only
-   * one cell changes and it contains a formula. For plain values, no HF
-   * update is needed at all since HF is only used to evaluate formulas.
-   */
   private updateHFCell(r: number, c: number): void {
     if (!this.hf) return;
     const cell = this.currentSheet().cells[cellAddr(r,c)];
@@ -290,7 +293,7 @@ export class EngSheetView extends FileView {
       const hfInst = this.hf as { setCellContents: (addr: object, content: unknown) => void };
       const content = cell?.f ? this.resolveCustomFuncs(cell.f) : (cell?.v ?? null);
       hfInst.setCellContents({ sheet:0, row:r, col:c }, [[content]]);
-    } catch { /* fall back to full rebuild on next opportunity */ }
+    } catch { /* fall back to full rebuild */ }
     this.processExports();
   }
 
@@ -311,21 +314,18 @@ export class EngSheetView extends FileView {
   private processExports(): void {
     const filePath = this.file?.path ?? "unknown";
     const sheet = this.currentSheet();
-
     const prevExported = new Set<string>(
       this.store.getAllEntries()
         .filter(e => e.entry.source === filePath && e.entry.block === "engsheet")
         .map(e => e.key)
     );
     const nowExported = new Set<string>();
-
     this._suppressStoreListener = true;
     try {
       for (const [addr, cell] of Object.entries(sheet.cells)) {
         if (!cell?.f) continue;
         const m = cell.f.match(/EXPORT\s*\(\s*[^,]+\s*,\s*["']([^"']+)["']\s*(?:,\s*["']([^"']*?)["']\s*)?\)/i);
         if (!m) continue;
-        // Mark alive before value check — cell still has EXPORT even if value is currently null
         nowExported.add(m[1]);
         const p = parseAddr(addr);
         if (!p) continue;
@@ -335,14 +335,9 @@ export class EngSheetView extends FileView {
           const lower = rawScope.toLowerCase();
           let vis: VariableVisibility = "global";
           let explicitFolder: string | undefined;
-          if (lower.startsWith("folder:")) {
-            vis = "folder";
-            explicitFolder = rawScope.slice(7).trim() || undefined;
-          } else if (lower === "folder") {
-            vis = "folder";
-          } else if (lower === "tag") {
-            vis = "tag";
-          }
+          if (lower.startsWith("folder:")) { vis = "folder"; explicitFolder = rawScope.slice(7).trim() || undefined; }
+          else if (lower === "folder") { vis = "folder"; }
+          else if (lower === "tag") { vis = "tag"; }
           this.store.set(m[1], value, undefined, filePath, "engsheet", "global", vis, undefined, explicitFolder);
         }
       }
@@ -382,6 +377,7 @@ export class EngSheetView extends FileView {
       for (const s of parsed.sheets) {
         s.cells ??= {}; s.colWidths ??= {}; s.rowHeights ??= {};
         s.numRows ??= DEFAULT_ROWS; s.numCols ??= DEFAULT_COLS;
+        s.frozen ??= { rows: 0, cols: 0 };
       }
       this.fileData = parsed;
     } catch { this.fileData = emptyFile(); }
@@ -392,163 +388,206 @@ export class EngSheetView extends FileView {
     try {
       await this.app.vault.modify(this.file, JSON.stringify(this.fileData, null, 2));
       this.isDirty = false;
+      this.setStatusLeft("Autosaved");
     } catch(e) { console.error("[Engineer] Save failed:", e); }
   }
 
   private markDirty(): void {
     this.isDirty = true;
+    this.setStatusLeft("Saving…");
     clearTimeout(this._saveTimer!);
     this._saveTimer = setTimeout(() => this.saveFile(), 1500);
   }
 
-  // ─── UI shell ────────────────────────────────────────────────────────────────
+  // ─── UI Shell ────────────────────────────────────────────────────────────────
 
   private buildUI(): void {
     const container = this.containerEl.children[1] as HTMLElement;
     container.empty();
-    container.style.cssText = "display:flex;flex-direction:column;height:100%;overflow:hidden;user-select:none";
+    container.addClass("eng-sheet-container");
     container.oncontextmenu = (e) => e.preventDefault();
-    this.buildRibbon(container);
+    this.buildToolbar(container);
     this.buildFormulaBar(container);
-    this.gridScrollEl = container.createEl("div");
-    this.gridScrollEl.style.cssText = "flex:1;overflow:auto;position:relative;background:var(--background-primary)";
+    this.gridScrollEl = container.createDiv({ cls: "eng-sheet-grid" });
+    this.buildStatusBar(container);
     this.buildSheetTabs(container);
   }
 
-  // ─── Ribbon ──────────────────────────────────────────────────────────────────
+  // ─── Toolbar ─────────────────────────────────────────────────────────────────
 
-  private buildRibbon(parent: HTMLElement): void {
-    const ribbon = parent.createEl("div");
-    ribbon.style.cssText = "display:flex;align-items:center;gap:1px;padding:3px 6px;" +
-      "border-bottom:1px solid var(--background-modifier-border);" +
-      "background:var(--background-secondary);flex-shrink:0;flex-wrap:wrap";
+  private buildToolbar(parent: HTMLElement): void {
+    const toolbar = parent.createDiv({ cls: "eng-sheet-toolbar" });
+    const tabBar  = toolbar.createDiv({ cls: "eng-ribbon-tab-bar" });
+    const ribbonArea = toolbar.createDiv({ cls: "eng-ribbon-area" });
 
-    const grp = () => {
-      const g = ribbon.createEl("div");
-      g.style.cssText = "display:flex;align-items:center;gap:1px;padding-right:6px;" +
-        "border-right:1px solid var(--background-modifier-border);margin-right:4px";
-      return g;
-    };
+    const tabs: Array<{ id: "home"|"data"|"view"; label: string }> = [
+      { id:"home",  label:"Home"  },
+      { id:"data",  label:"Data"  },
+      { id:"view",  label:"View"  },
+    ];
 
-    // Minimal SVG icons — theme-coloured via currentColor
-    const ICONS: Record<string, string> = {
-      cut:    `<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="4" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><line x1="4" y1="1" x2="12" y2="9"/><line x1="12" y1="1" x2="4" y2="9"/></svg>`,
-      copy:   `<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="5" y="5" width="9" height="9" rx="1"/><path d="M11 5V3a1 1 0 0 0-1-1H3a1 1 0 0 0-1 1v7a1 1 0 0 0 1 1h2"/></svg>`,
-      paste:  `<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="4" width="10" height="11" rx="1"/><path d="M6 4V3a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v1"/></svg>`,
-      bold:   `<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M4 3h5a3 3 0 0 1 0 6H4zm0 6h5.5a3.5 3.5 0 0 1 0 7H4z" opacity=".9"/></svg>`,
-      italic: `<svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><path d="M7 3h4l-4 10H3l4-10z" opacity=".9"/></svg>`,
-      under:  `<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 3v5a4 4 0 0 0 8 0V3"/><line x1="2" y1="14" x2="14" y2="14"/></svg>`,
-      alL:    `<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><line x1="2" y1="4" x2="14" y2="4"/><line x1="2" y1="8" x2="10" y2="8"/><line x1="2" y1="12" x2="14" y2="12"/></svg>`,
-      alC:    `<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><line x1="2" y1="4" x2="14" y2="4"/><line x1="4" y1="8" x2="12" y2="8"/><line x1="2" y1="12" x2="14" y2="12"/></svg>`,
-      alR:    `<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><line x1="2" y1="4" x2="14" y2="4"/><line x1="6" y1="8" x2="14" y2="8"/><line x1="2" y1="12" x2="14" y2="12"/></svg>`,
-      insR:   `<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2" width="12" height="5" rx="1"/><rect x="2" y="9" width="12" height="5" rx="1"/><line x1="8" y1="6" x2="8" y2="9"/><line x1="6" y1="7.5" x2="10" y2="7.5"/></svg>`,
-      delR:   `<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2" width="12" height="5" rx="1"/><rect x="2" y="9" width="12" height="5" rx="1"/><line x1="6" y1="7.5" x2="10" y2="7.5"/></svg>`,
-      insC:   `<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2" width="5" height="12" rx="1"/><rect x="9" y="2" width="5" height="12" rx="1"/><line x1="6" y1="8" x2="9" y2="8"/><line x1="7.5" y1="6" x2="7.5" y2="10"/></svg>`,
-      delC:   `<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2" width="5" height="12" rx="1"/><rect x="9" y="2" width="5" height="12" rx="1"/><line x1="6" y1="8" x2="10" y2="8"/></svg>`,
-      save:   `<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 2h8l3 3v9a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z"/><rect x="5" y="9" width="6" height="5"/><rect x="5" y="2" width="4" height="4"/></svg>`,
-    };
+    for (const t of tabs) {
+      const panel = ribbonArea.createDiv({ cls: "eng-ribbon-panel" });
+      panel.style.display = t.id === this.activeRibbonTab ? "flex" : "none";
+      this.ribbonPanels[t.id] = panel;
 
-    const btn = (parent: HTMLElement, iconKey: string, title: string, action: () => void) => {
-      const b = parent.createEl("button");
-      b.innerHTML = ICONS[iconKey] ?? iconKey;
-      b.title = title;
-      b.style.cssText = "width:26px;height:26px;border-radius:3px;cursor:pointer;" +
-        "display:flex;align-items:center;justify-content:center;" +
-        "border:none;background:transparent;color:var(--text-normal);padding:0";
-      b.onmouseenter = () => b.style.background = "var(--background-modifier-hover)";
-      b.onmouseleave = () => b.style.background = "transparent";
-      b.onclick = action;
-      return b;
-    };
+      const tabBtn = tabBar.createEl("button", { text: t.label, cls: "eng-ribbon-tab" });
+      if (t.id === this.activeRibbonTab) tabBtn.addClass("active");
+      tabBtn.onclick = () => {
+        tabBar.querySelectorAll<HTMLElement>(".eng-ribbon-tab").forEach(b => b.removeClass("active"));
+        tabBtn.addClass("active");
+        Object.values(this.ribbonPanels).forEach(p => p && (p.style.display = "none"));
+        panel.style.display = "flex";
+        this.activeRibbonTab = t.id;
+      };
+    }
 
-    const sep = (g: HTMLElement) => {
-      const s = g.createEl("div");
-      s.style.cssText = "width:1px;height:18px;background:var(--background-modifier-border);margin:0 2px";
-    };
+    this.buildHomePanel(this.ribbonPanels.home!);
+    this.buildDataPanel(this.ribbonPanels.data!);
+    this.buildViewPanel(this.ribbonPanels.view!);
+  }
+
+  // ─── Ribbon groups ────────────────────────────────────────────────────────────
+
+  private grp(panel: HTMLElement, label: string): HTMLElement {
+    const g    = panel.createDiv({ cls: "eng-ribbon-group" });
+    const body = g.createDiv({ cls: "eng-ribbon-group-body" });
+    g.createDiv({ cls: "eng-ribbon-group-label", text: label });
+    return body;
+  }
+
+  private rBtn(
+    parent: HTMLElement,
+    icon: string,
+    title: string,
+    action: () => void,
+    label?: string,
+    dataAttr?: string
+  ): HTMLElement {
+    const b = parent.createDiv({ cls: "eng-rbn-btn", title });
+    if (dataAttr) b.dataset.fmtBtn = dataAttr;
+    const iconEl = b.createDiv({ cls: "eng-rbn-icon" });
+    setIcon(iconEl, icon);
+    if (label) b.createDiv({ cls: "eng-rbn-label", text: label });
+    b.onclick = action;
+    return b;
+  }
+
+  private rSep(parent: HTMLElement): void {
+    parent.createDiv({ cls: "eng-rbn-sep" });
+  }
+
+  private buildHomePanel(panel: HTMLElement): void {
+    // Undo / Redo
+    const ug = this.grp(panel, "History");
+    this.rBtn(ug, "undo",  "Undo (Ctrl+Z)",       () => this.undo(),  "Undo");
+    this.rBtn(ug, "redo",  "Redo (Ctrl+Y / ⇧Z)", () => this.redo(),  "Redo");
 
     // Clipboard
-    const cg = grp();
-    btn(cg, "cut",   "Cut (Ctrl+X)",   () => this.cutSelection());
-    btn(cg, "copy",  "Copy (Ctrl+C)",  () => this.copySelectionFull());
-    btn(cg, "paste", "Paste (Ctrl+V)", () => this.pasteClipboard());
+    const cg = this.grp(panel, "Clipboard");
+    this.rBtn(cg, "clipboard",  "Paste (Ctrl+V)",    () => this.pasteClipboard(),      "Paste");
+    this.rSep(cg);
+    this.rBtn(cg, "scissors",   "Cut (Ctrl+X)",      () => this.cutSelection(),        "Cut");
+    this.rBtn(cg, "copy",       "Copy (Ctrl+C)",     () => this.copySelectionFull(),   "Copy");
 
     // Font
-    const fg = grp();
-    btn(fg, "bold",  "Bold (Ctrl+B)",      () => this.toggleFormat("bold"));
-    btn(fg, "italic","Italic (Ctrl+I)",     () => this.toggleFormat("italic"));
-    btn(fg, "under", "Underline (Ctrl+U)",  () => this.toggleFormat("underline"));
-    sep(fg);
-    this.buildColorPicker(fg, "A", "Font color",  "color",  "#000000");
-    this.buildColorPicker(fg, "▧", "Fill color",  "bg",     "#ffff00");
+    const fg = this.grp(panel, "Font");
+    this.rBtn(fg, "bold",      "Bold (Ctrl+B)",      () => this.toggleFormat("bold"),      undefined, "bold");
+    this.rBtn(fg, "italic",    "Italic (Ctrl+I)",    () => this.toggleFormat("italic"),    undefined, "italic");
+    this.rBtn(fg, "underline", "Underline (Ctrl+U)", () => this.toggleFormat("underline"), undefined, "underline");
+    this.rSep(fg);
+    this.buildColorBtn(fg, "type",    "Font color", "color",  "#333333");
+    this.buildColorBtn(fg, "droplet", "Fill color", "bg",     "#ffff00");
 
     // Alignment
-    const ag = grp();
-    btn(ag, "alL", "Align left",   () => this.applyStyle(s => { s.align = "left"; }));
-    btn(ag, "alC", "Align center", () => this.applyStyle(s => { s.align = "center"; }));
-    btn(ag, "alR", "Align right",  () => this.applyStyle(s => { s.align = "right"; }));
+    const ag = this.grp(panel, "Alignment");
+    this.rBtn(ag, "align-left",   "Align left",    () => this.applyStyle(s => { s.align = "left";   }));
+    this.rBtn(ag, "align-center", "Align center",  () => this.applyStyle(s => { s.align = "center"; }));
+    this.rBtn(ag, "align-right",  "Align right",   () => this.applyStyle(s => { s.align = "right";  }));
+    this.rSep(ag);
+    this.rBtn(ag, "wrap-text",    "Wrap text",     () => this.toggleWrap(), undefined, "wrap");
 
-    // Number format
-    const ng = grp();
-    this.fmtSelect = ng.createEl("select");
-    this.fmtSelect.style.cssText = "font-size:11px;height:24px;border-radius:3px;" +
-      "border:1px solid var(--background-modifier-border);" +
-      "background:var(--background-primary);color:var(--text-normal);padding:0 4px;cursor:pointer;max-width:140px";
+    // Borders
+    const bg = this.grp(panel, "Borders");
+    this.rBtn(bg, "grid-3x3",  "All borders",   () => this.applyBorder("all"));
+    this.rBtn(bg, "square",    "Outer border",  () => this.applyBorder("outer"));
+    this.rBtn(bg, "minus",     "No borders",    () => this.applyBorder("none"));
+
+    // Number
+    const ng = this.grp(panel, "Number");
+    this.fmtSelect = ng.createEl("select", { cls: "eng-fmt-select" });
     for (const [val, label] of NUMBER_FORMATS) {
       const opt = this.fmtSelect.createEl("option", { text: label });
       opt.value = val;
     }
-    this.fmtSelect.onchange = () => this.applyStyle(s => {
-      s.format = this.fmtSelect.value;
-      // Refresh affected cells
+    this.fmtSelect.onchange = () => {
+      this.applyStyle(s => { s.format = this.fmtSelect.value; });
       this.refreshSelectionCells();
-    });
+    };
 
     // Cells
-    const cellG = grp();
-    btn(cellG, "insR", "Insert row above",   () => this.insertRow());
-    btn(cellG, "delR", "Delete row",         () => this.deleteRow());
-    btn(cellG, "insC", "Insert column left", () => this.insertCol());
-    btn(cellG, "delC", "Delete column",      () => this.deleteCol());
+    const cellG = this.grp(panel, "Cells");
+    this.rBtn(cellG, "arrow-up-to-line",   "Insert row above",    () => this.insertRow());
+    this.rBtn(cellG, "arrow-down-to-line", "Insert row below",    () => this.insertRowBelow());
+    this.rBtn(cellG, "row-spacing",        "Delete row(s)",       () => this.deleteRow());
+    this.rSep(cellG);
+    this.rBtn(cellG, "arrow-left-to-line", "Insert column left",  () => this.insertCol());
+    this.rBtn(cellG, "arrow-right-to-line","Insert column right", () => this.insertColRight());
+    this.rBtn(cellG, "columns",            "Delete column(s)",    () => this.deleteCol());
 
-    // Save (flush right)
-    const sg = ribbon.createEl("div");
-    sg.style.cssText = "margin-left:auto";
-    btn(sg, "save", "Save (Ctrl+S)", () => this.saveFile());
+    // Clear
+    const clrG = this.grp(panel, "Clear");
+    this.rBtn(clrG, "eraser",       "Clear contents (Delete)", () => this.clearSelection());
+    this.rBtn(clrG, "paintbrush",   "Clear formatting",        () => this.clearFormatting());
   }
 
-  private buildColorPicker(parent: HTMLElement, icon: string, title: string, prop: "color" | "bg", defaultColor: string): void {
-    const wrap = parent.createEl("div");
-    wrap.style.cssText = "position:relative;width:26px;height:26px;display:flex;flex-direction:column;" +
-      "align-items:center;justify-content:center;border-radius:3px;cursor:pointer";
-    wrap.title = title;
-    const label = wrap.createEl("span", { text: icon });
-    label.style.cssText = "font-size:11px;line-height:1;pointer-events:none;color:var(--text-normal);font-weight:500";
-    const bar = wrap.createEl("div");
-    bar.style.cssText = `height:3px;width:16px;background:${defaultColor};border-radius:1px;pointer-events:none`;
+  private buildDataPanel(panel: HTMLElement): void {
+    const sg = this.grp(panel, "Sort");
+    this.rBtn(sg, "arrow-up-a-z",   "Sort A → Z (ascending)",  () => this.sortColumn(true),  "A → Z");
+    this.rBtn(sg, "arrow-down-z-a", "Sort Z → A (descending)", () => this.sortColumn(false), "Z → A");
+
+    const ig = this.grp(panel, "CSV");
+    this.rBtn(ig, "upload",   "Import CSV file into sheet at active cell", () => this.importCSV(),   "Import");
+    this.rBtn(ig, "download", "Export sheet to CSV file",                  () => this.exportCSV(),   "Export");
+  }
+
+  private buildViewPanel(panel: HTMLElement): void {
+    const fg = this.grp(panel, "Freeze Panes");
+    this.rBtn(fg, "lock",   "Freeze top row",      () => this.freezeRows(1), "Top Row");
+    this.rBtn(fg, "lock",   "Freeze first column", () => this.freezeCols(1), "First Col");
+    this.rBtn(fg, "unlock", "Unfreeze all",        () => this.unfreeze(),    "Unfreeze");
+  }
+
+  private buildColorBtn(
+    parent: HTMLElement,
+    icon: string,
+    title: string,
+    prop: "color" | "bg",
+    defaultColor: string
+  ): void {
+    const wrap = parent.createDiv({ cls: "eng-rbn-color-btn", title });
+    const iconEl = wrap.createDiv({ cls: "eng-rbn-icon" });
+    setIcon(iconEl, icon);
+    const bar = wrap.createDiv({ cls: "eng-rbn-color-bar" });
+    bar.style.background = defaultColor;
     const input = wrap.createEl("input") as HTMLInputElement;
     input.type = "color"; input.value = defaultColor;
-    input.style.cssText = "position:absolute;opacity:0;width:26px;height:26px;cursor:pointer;top:0;left:0;padding:0;border:none";
+    input.className = "eng-rbn-color-input";
     input.oninput = () => {
       bar.style.background = input.value;
       this.applyStyle(s => { s[prop] = input.value; });
       this.refreshSelectionCells();
     };
-    wrap.onmouseenter = () => wrap.style.background = "var(--background-modifier-hover)";
-    wrap.onmouseleave = () => wrap.style.background = "transparent";
   }
 
   // ─── Formula bar ─────────────────────────────────────────────────────────────
 
   private buildFormulaBar(parent: HTMLElement): void {
-    const bar = parent.createEl("div");
-    bar.style.cssText = "display:flex;align-items:center;" +
-      "border-bottom:1px solid var(--background-modifier-border);flex-shrink:0;background:var(--background-primary)";
+    const bar = parent.createDiv({ cls: "eng-formula-bar" });
 
-    this.nameBox = bar.createEl("input") as HTMLInputElement;
+    this.nameBox = bar.createEl("input", { cls: "eng-name-box" }) as HTMLInputElement;
     this.nameBox.type = "text";
-    this.nameBox.style.cssText = "width:64px;flex-shrink:0;font-size:12px;font-family:var(--font-monospace);" +
-      "border:none;border-right:1px solid var(--background-modifier-border);" +
-      "padding:0 6px;height:26px;background:var(--background-primary);color:var(--text-normal);outline:none;font-weight:500";
+    this.nameBox.spellcheck = false;
     this.nameBox.onkeydown = (e) => {
       if (e.key === "Enter") {
         const p = parseAddr(this.nameBox.value.toUpperCase().trim());
@@ -556,47 +595,84 @@ export class EngSheetView extends FileView {
       }
     };
 
-    const fx = bar.createEl("span", { text: "fx" });
-    fx.style.cssText = "padding:0 8px;font-size:11px;color:var(--text-muted);font-style:italic;" +
-      "border-right:1px solid var(--background-modifier-border);height:26px;display:flex;align-items:center;flex-shrink:0";
+    const fx = bar.createDiv({ cls: "eng-fx-label" });
+    setIcon(fx, "function-square");
 
-    this.formulaInput = bar.createEl("input") as HTMLInputElement;
+    this.formulaInput = bar.createEl("input", { cls: "eng-formula-input" }) as HTMLInputElement;
     this.formulaInput.type = "text";
-    // No placeholder text — keep it clean
-    this.formulaInput.style.cssText = "flex:1;font-size:12px;font-family:var(--font-monospace);" +
-      "border:none;padding:0 8px;height:26px;background:var(--background-primary);color:var(--text-normal);outline:none";
+    this.formulaInput.spellcheck = false;
     this.formulaInput.onkeydown = (e) => {
       if (e.key === "Enter")  { this.commitFormulaBar(); this.gridScrollEl.focus(); }
       if (e.key === "Escape") { this.refreshFormulaBar(); this.gridScrollEl.focus(); }
     };
   }
 
+  // ─── Status bar ──────────────────────────────────────────────────────────────
+
+  private buildStatusBar(parent: HTMLElement): void {
+    const bar = parent.createDiv({ cls: "eng-status-bar" });
+    this.statusLeftEl  = bar.createDiv({ cls: "eng-status-left", text: "Autosaved" });
+    this.statusInfoEl  = bar.createDiv({ cls: "eng-status-right" });
+  }
+
+  private setStatusLeft(text: string): void {
+    if (this.statusLeftEl) this.statusLeftEl.textContent = text;
+  }
+
+  private updateStatusBar(): void {
+    if (!this.statusInfoEl) return;
+    this.statusInfoEl.empty();
+
+    const { r0,c0,r1,c1 } = this.sel;
+    const sR0=Math.min(r0,r1), sR1=Math.max(r0,r1);
+    const sC0=Math.min(c0,c1), sC1=Math.max(c0,c1);
+    const isRange = sR0!==sR1 || sC0!==sC1;
+
+    const label = isRange
+      ? `${cellAddr(sR0,sC0)}:${cellAddr(sR1,sC1)}`
+      : cellAddr(sR0,sC0);
+    this.statusInfoEl.createSpan({ cls:"eng-status-addr", text: label });
+
+    if (isRange) {
+      const nums: number[] = [];
+      for (let r=sR0; r<=sR1; r++)
+        for (let c=sC0; c<=sC1; c++) {
+          const v = this.getComputedValue(r,c);
+          if (typeof v === "number" && isFinite(v)) nums.push(v);
+        }
+      if (nums.length > 0) {
+        const sum = nums.reduce((a,b)=>a+b,0);
+        const avg = sum/nums.length;
+        this.statusInfoEl.createSpan({
+          cls: "eng-status-stats",
+          text: `Sum: ${applyFormat(sum)} · Count: ${nums.length} · Avg: ${applyFormat(avg)}`,
+        });
+      } else {
+        const total = (sR1-sR0+1)*(sC1-sC0+1);
+        this.statusInfoEl.createSpan({ cls:"eng-status-stats", text:`Count: ${total}` });
+      }
+    }
+  }
+
   // ─── Sheet tabs ───────────────────────────────────────────────────────────────
 
   private buildSheetTabs(parent: HTMLElement): void {
-    this.sheetTabsEl = parent.createEl("div");
-    this.sheetTabsEl.style.cssText = "display:flex;align-items:stretch;" +
-      "border-top:1px solid var(--background-modifier-border);" +
-      "background:var(--background-secondary);flex-shrink:0;overflow-x:auto;height:26px";
+    this.sheetTabsEl = parent.createDiv({ cls: "eng-sheet-tabs" });
     this.renderTabs();
   }
 
   private renderTabs(): void {
     this.sheetTabsEl.empty();
-    const addBtn = this.sheetTabsEl.createEl("div", { text: "+" });
-    addBtn.style.cssText = "padding:0 10px;cursor:pointer;display:flex;align-items:center;" +
-      "color:var(--text-muted);font-size:16px;border-right:1px solid var(--background-modifier-border)";
-    addBtn.title = "Add sheet";
+    const addBtn = this.sheetTabsEl.createDiv({ cls: "eng-tab-add-btn", title: "New sheet" });
+    setIcon(addBtn, "plus");
     addBtn.onclick = () => this.addSheet();
+
     this.fileData.sheets.forEach((sheet, idx) => {
-      const tab = this.sheetTabsEl.createEl("div", { text: sheet.name });
       const active = idx === this.activeSheet;
-      tab.style.cssText = "padding:0 14px;cursor:pointer;display:flex;align-items:center;font-size:12px;white-space:nowrap;" +
-        "border-right:1px solid var(--background-modifier-border);" +
-        (active ? "background:var(--background-primary);color:var(--text-normal);border-bottom:2px solid var(--interactive-accent);"
-                : "background:transparent;color:var(--text-muted)");
-      tab.onclick      = () => { this.activeSheet = idx; this.switchSheet(); };
-      tab.ondblclick   = () => this.renameSheet(idx);
+      const tab = this.sheetTabsEl.createDiv({ cls: "eng-sheet-tab" + (active ? " active" : "") });
+      tab.createSpan({ text: sheet.name });
+      tab.onclick       = () => { this.activeSheet = idx; this.switchSheet(); };
+      tab.ondblclick    = () => this.renameSheet(idx);
       tab.oncontextmenu = (e) => { e.preventDefault(); this.showSheetContextMenu(e, idx); };
     });
   }
@@ -606,94 +682,92 @@ export class EngSheetView extends FileView {
     menu.addItem(i => i.setTitle("Rename").onClick(()    => this.renameSheet(idx)));
     menu.addItem(i => i.setTitle("Duplicate").onClick(() => this.duplicateSheet(idx)));
     menu.addSeparator();
-    menu.addItem(i => i.setTitle("Delete").onClick(()    => this.deleteSheetAt(idx)));
+    menu.addItem(i => i.setTitle("Delete").onClick(() => this.deleteSheetAt(idx)));
     menu.showAtMouseEvent(e);
   }
 
-  // ─── Grid — built once, updated in-place ──────────────────────────────────────
+  // ─── Grid — built once, updated in-place ─────────────────────────────────────
 
-  /**
-   * Builds the full table DOM structure once. After this, cell content and
-   * highlight changes are done by updating individual <td> elements in-place
-   * via cellEls[r][c] references — no innerHTML clearing.
-   */
   private buildGrid(): void {
+    this.fillHandleEl = null;
+    this.fillPreviewCells = [];
     this.gridScrollEl.empty();
     this.cellEls = [];
-    const sheet = this.currentSheet();
+    const sheet  = this.currentSheet();
+    const frozen = sheet.frozen ?? { rows:0, cols:0 };
 
     this.tableEl = this.gridScrollEl.createEl("table") as HTMLTableElement;
-    this.tableEl.style.cssText = "border-collapse:collapse;table-layout:fixed;font-size:12px;font-family:var(--font-text)";
+    this.tableEl.addClass("eng-grid-table");
     this.tableEl.tabIndex = 0;
 
-    // ── Column headers ────────────────────────────────────────────────────────
+    // Column headers
     this.theadEl = this.tableEl.createEl("thead") as HTMLTableSectionElement;
-    const hrow = this.theadEl.createEl("tr");
+    const hrow   = this.theadEl.createEl("tr");
 
-    const corner = hrow.createEl("th");
-    corner.style.cssText = `width:${ROW_HDR_W}px;min-width:${ROW_HDR_W}px;height:${COL_HDR_H}px;` +
-      "background:var(--background-secondary);border-right:1px solid var(--background-modifier-border);" +
-      "border-bottom:2px solid var(--background-modifier-border);position:sticky;top:0;left:0;z-index:4;cursor:pointer";
+    const corner = hrow.createEl("th", { cls: "eng-corner" });
+    corner.style.width = corner.style.minWidth = ROW_HDR_W + "px";
+    corner.style.height = COL_HDR_H + "px";
     corner.title = "Select all (Ctrl+A)";
     corner.onclick = () => this.selectAll();
 
     for (let c = 0; c < sheet.numCols; c++) {
-      const w = sheet.colWidths[c] ?? DEFAULT_COL_W;
-      const th = hrow.createEl("th");
-      th.style.cssText = `width:${w}px;min-width:${w}px;max-width:${w}px;height:${COL_HDR_H}px;` +
-        "text-align:center;font-size:11px;user-select:none;overflow:hidden;position:sticky;top:0;z-index:2;" +
-        "border-right:1px solid var(--background-modifier-border);" +
-        "border-bottom:2px solid var(--background-modifier-border);" +
-        "background:var(--background-secondary);color:var(--text-muted);font-weight:400";
+      const w  = sheet.colWidths[c] ?? DEFAULT_COL_W;
+      const th = hrow.createEl("th", { cls: "eng-col-hdr" + (c < frozen.cols ? " eng-frozen-col" : "") });
+      th.style.width = th.style.minWidth = th.style.maxWidth = w + "px";
+      th.style.height = COL_HDR_H + "px";
+      if (c < frozen.cols) th.style.left = (ROW_HDR_W + this.frozenColOffset(sheet, c)) + "px";
       th.createEl("span", { text: colLetter(c) });
-      const rh = th.createEl("div");
-      rh.style.cssText = "position:absolute;right:0;top:0;width:4px;height:100%;cursor:col-resize;z-index:3";
+      const rh = th.createEl("div", { cls: "eng-col-resize" });
       rh.onmousedown = (e) => this.startColResize(e, c);
       th.onclick = (e) => { if (!this.colResizing) this.selectCol(c, e.shiftKey); };
     }
 
-    // ── Data rows ─────────────────────────────────────────────────────────────
+    // Data rows
     this.tbodyEl = this.tableEl.createEl("tbody") as HTMLTableSectionElement;
-
     for (let r = 0; r < sheet.numRows; r++) {
       this.cellEls.push([]);
-      const h = sheet.rowHeights[r] ?? DEFAULT_ROW_H;
+      const h  = sheet.rowHeights[r] ?? DEFAULT_ROW_H;
       const tr = this.tbodyEl.createEl("tr");
       tr.style.height = h + "px";
 
-      const rowHdr = tr.createEl("td");
-      rowHdr.style.cssText = `width:${ROW_HDR_W}px;min-width:${ROW_HDR_W}px;text-align:center;font-size:11px;` +
-        "position:sticky;left:0;z-index:1;user-select:none;cursor:pointer;" +
-        "border-right:1px solid var(--background-modifier-border);" +
-        "border-bottom:1px solid var(--background-modifier-border);" +
-        "background:var(--background-secondary);color:var(--text-muted);font-weight:400";
-      rowHdr.setText(String(r+1));
-      rowHdr.onclick = (e) => this.selectRow(r, e.shiftKey);
+      const rh = tr.createEl("td", { cls: "eng-row-hdr" + (r < frozen.rows ? " eng-frozen-row" : "") });
+      rh.style.width = rh.style.minWidth = ROW_HDR_W + "px";
+      if (r < frozen.rows) rh.style.top = (COL_HDR_H + this.frozenRowOffset(sheet, r)) + "px";
+      rh.setText(String(r+1));
+      rh.onclick = (ev) => this.selectRow(r, ev.shiftKey);
 
       for (let c = 0; c < sheet.numCols; c++) {
-        const w = sheet.colWidths[c] ?? DEFAULT_COL_W;
-        const td = tr.createEl("td") as HTMLTableCellElement;
-        td.style.cssText = `width:${w}px;min-width:${w}px;max-width:${w}px;height:${h}px;` +
-          "padding:0 3px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;box-sizing:border-box;" +
-          "border-right:1px solid var(--background-modifier-border);" +
-          "border-bottom:1px solid var(--background-modifier-border);cursor:cell;" +
-          "background:var(--background-primary);color:var(--text-normal);text-align:left";
+        const w  = sheet.colWidths[c] ?? DEFAULT_COL_W;
+        const td = tr.createEl("td", { cls: "eng-cell" }) as HTMLTableCellElement;
+        td.style.width = td.style.minWidth = td.style.maxWidth = w + "px";
+        td.style.height = h + "px";
+        if (r < frozen.rows && c < frozen.cols) {
+          td.addClass("eng-frozen-corner-cell");
+          td.style.top  = (COL_HDR_H + this.frozenRowOffset(sheet, r)) + "px";
+          td.style.left = (ROW_HDR_W + this.frozenColOffset(sheet, c)) + "px";
+        } else if (r < frozen.rows) {
+          td.addClass("eng-frozen-row-cell");
+          td.style.top = (COL_HDR_H + this.frozenRowOffset(sheet, r)) + "px";
+        } else if (c < frozen.cols) {
+          td.addClass("eng-frozen-col-cell");
+          td.style.left = (ROW_HDR_W + this.frozenColOffset(sheet, c)) + "px";
+        }
         this.cellEls[r].push(td);
 
-        td.onmousedown = (e: MouseEvent) => {
-          if (e.button !== 0) return;
-          e.preventDefault();
-          if (e.shiftKey) this.extendSelection(r, c);
+        td.onmousedown = (ev: MouseEvent) => {
+          if (ev.button !== 0) return;
+          ev.preventDefault();
+          if (ev.shiftKey) this.extendSelection(r, c);
           else { this.setSelection(r, c, r, c); this.startMouseSelect(r, c); }
           this.tableEl.focus();
         };
         td.ondblclick    = () => this.startEdit(r, c, td);
-        td.oncontextmenu = (e: MouseEvent) => {
-          e.preventDefault();
+        td.oncontextmenu = (ev: MouseEvent) => {
+          ev.preventDefault();
           const { r0,c0,r1,c1 } = this.sel;
           const sR0=Math.min(r0,r1),sR1=Math.max(r0,r1),sC0=Math.min(c0,c1),sC1=Math.max(c0,c1);
-          if (!(r >= sR0 && r <= sR1 && c >= sC0 && c <= sC1)) this.setSelection(r,c,r,c);
-          this.showContextMenu(e);
+          if (!(r>=sR0&&r<=sR1&&c>=sC0&&c<=sC1)) this.setSelection(r,c,r,c);
+          this.showContextMenu(ev);
         };
       }
     }
@@ -710,12 +784,35 @@ export class EngSheetView extends FileView {
         }
       }
     });
+
+    // TSV paste from external sources (Google Sheets, Excel).
+    // Fires on Ctrl+V when no internal clipboard is set; internal clipboard
+    // is handled by handleKey → pasteClipboard() and takes priority.
+    this.tableEl.addEventListener("paste", (e: ClipboardEvent) => {
+      if (this.editingCell) return;
+      if (this.clipboard) return; // internal cut/copy takes priority
+      e.preventDefault();
+      const text = e.clipboardData?.getData("text/plain") ?? "";
+      if (!text) return;
+      const delimiter = text.includes("\t") ? "\t" : ",";
+      this.pasteExternalData(this.parseDelimited(text, delimiter as "\t" | ","));
+    });
   }
 
-  /**
-   * Update the content and style of a single cell's <td> in-place.
-   * Called instead of full re-render whenever possible.
-   */
+  private frozenRowOffset(sheet: SheetData, upToRow: number): number {
+    let offset = 0;
+    for (let r = 0; r < upToRow; r++) offset += sheet.rowHeights[r] ?? DEFAULT_ROW_H;
+    return offset;
+  }
+
+  private frozenColOffset(sheet: SheetData, upToCol: number): number {
+    let offset = 0;
+    for (let c = 0; c < upToCol; c++) offset += sheet.colWidths[c] ?? DEFAULT_COL_W;
+    return offset;
+  }
+
+  // ─── Cell rendering ───────────────────────────────────────────────────────────
+
   private refreshCell(r: number, c: number): void {
     const td = this.cellEls[r]?.[c];
     if (!td) return;
@@ -726,34 +823,45 @@ export class EngSheetView extends FileView {
     const fmt   = cell?.style?.format;
     const isNum = typeof value === "number";
     const w     = sheet.colWidths[c] ?? DEFAULT_COL_W;
+    const h     = sheet.rowHeights[r] ?? DEFAULT_ROW_H;
 
     td.style.width = td.style.minWidth = td.style.maxWidth = w + "px";
-    td.style.fontWeight      = cell?.style?.bold      ? "bold"      : "normal";
-    td.style.fontStyle       = cell?.style?.italic    ? "italic"    : "normal";
-    td.style.textDecoration  = cell?.style?.underline ? "underline" : "none";
-    td.style.color           = cell?.style?.color     ?? "var(--text-normal)";
-    td.style.backgroundColor = cell?.style?.bg        ?? "var(--background-primary)";
-    td.style.textAlign       = cell?.style?.align     ?? (isNum ? "right" : "left");
+    td.style.height = h + "px";
+    td.style.fontWeight     = cell?.style?.bold      ? "600"        : "";
+    td.style.fontStyle      = cell?.style?.italic    ? "italic"     : "";
+    td.style.textDecoration = cell?.style?.underline ? "underline"  : "";
+    td.style.color          = cell?.style?.color     ?? "";
+    td.style.backgroundColor= cell?.style?.bg        ?? "";
+    td.style.textAlign      = cell?.style?.align     ?? (isNum ? "right" : "left");
+    td.style.whiteSpace     = cell?.style?.wrap      ? "pre-wrap"   : "nowrap";
 
-    // Formula indicator (tiny superscript f)
+    // Border
+    const border = cell?.style?.border;
+    td.style.outline    = border === "all"   ? "1px solid var(--text-muted)" : "";
+    td.style.boxShadow  = border === "outer" ? "inset 0 0 0 1px var(--text-muted)" : "";
+
+    // Formula dot indicator (top-right corner)
+    const existing = td.querySelector(".eng-formula-dot");
     if (cell?.f) {
-      td.style.position = "relative";
-      // Only add if not already there
-      if (!td.querySelector(".eng-fi")) {
-        const fi = td.createEl("span");
-        fi.className = "eng-fi";
-        fi.style.cssText = "position:absolute;top:1px;right:2px;font-size:7px;color:#999;font-style:italic;pointer-events:none;font-family:serif";
-        fi.textContent = "f";
+      if (!existing) {
+        const dot = td.createEl("span", { cls: "eng-formula-dot" });
+        dot.title = cell.f;
+      } else {
+        (existing as HTMLElement).title = cell.f;
       }
     } else {
-      td.querySelector(".eng-fi")?.remove();
+      existing?.remove();
     }
+
+    // Error styling
+    const errStr = typeof value === "string" && value.startsWith("#");
+    if (errStr) td.addClass("eng-cell-hf-error");
+    else td.removeClass("eng-cell-hf-error");
 
     td.childNodes.forEach(n => { if (n.nodeType === Node.TEXT_NODE) n.remove(); });
     td.prepend(document.createTextNode(applyFormat(value, fmt)));
   }
 
-  /** Refresh all cells — used after sheet switch or store change. */
   private refreshAllCells(): void {
     const sheet = this.currentSheet();
     for (let r = 0; r < sheet.numRows; r++)
@@ -761,89 +869,76 @@ export class EngSheetView extends FileView {
         this.refreshCell(r, c);
   }
 
-  /** Refresh only the cells in the current selection — used after formatting. */
   private refreshSelectionCells(): void {
     const { r0,c0,r1,c1 } = this.sel;
-    for (let r = Math.min(r0,r1); r <= Math.max(r0,r1); r++)
-      for (let c = Math.min(c0,c1); c <= Math.max(c0,c1); c++)
-        this.refreshCell(r, c);
+    for (let r=Math.min(r0,r1); r<=Math.max(r0,r1); r++)
+      for (let c=Math.min(c0,c1); c<=Math.max(c0,c1); c++)
+        this.refreshCell(r,c);
     this.markDirty();
   }
 
-  /**
-   * Apply the selection highlight by updating only the <td> and header cells
-   * that changed between prevSel and sel. Avoids touching all 1,300 cells.
-   */
+  private refreshAllFormulaCells(): void {
+    const sheet = this.currentSheet();
+    for (const [addr, cell] of Object.entries(sheet.cells)) {
+      if (!cell?.f) continue;
+      const p = parseAddr(addr);
+      if (p) this.refreshCell(p.row, p.col);
+    }
+    this.refreshCell(this.sel.r1, this.sel.c1);
+  }
+
+  // ─── Selection ────────────────────────────────────────────────────────────────
+
   private updateSelection(): void {
     const { r0,c0,r1,c1 } = this.sel;
     const { r0:pr0,c0:pc0,r1:pr1,c1:pc1 } = this.prevSel;
-    const selR0=Math.min(r0,r1),selR1=Math.max(r0,r1),selC0=Math.min(c0,c1),selC1=Math.max(c0,c1);
+    const sR0=Math.min(r0,r1),sR1=Math.max(r0,r1),sC0=Math.min(c0,c1),sC1=Math.max(c0,c1);
     const pR0=Math.min(pr0,pr1),pR1=Math.max(pr0,pr1),pC0=Math.min(pc0,pc1),pC1=Math.max(pc0,pc1);
 
-    const wasInSel = (r: number, c: number) => r>=pR0&&r<=pR1&&c>=pC0&&c<=pC1;
-    const nowInSel = (r: number, c: number) => r>=selR0&&r<=selR1&&c>=selC0&&c<=selC1;
+    const wasIn = (r: number, c: number) => r>=pR0&&r<=pR1&&c>=pC0&&c<=pC1;
+    const nowIn = (r: number, c: number) => r>=sR0&&r<=sR1&&c>=sC0&&c<=sC1;
 
-    // Update cells that changed selection state
-    const rowsToCheck = new Set<number>();
-    const colsToCheck = new Set<number>();
-    for (let r = Math.min(pR0,selR0); r <= Math.max(pR1,selR1); r++) rowsToCheck.add(r);
-    for (let c = Math.min(pC0,selC0); c <= Math.max(pC1,selC1); c++) colsToCheck.add(c);
+    const rows = new Set<number>(), cols = new Set<number>();
+    for (let r=Math.min(pR0,sR0); r<=Math.max(pR1,sR1); r++) rows.add(r);
+    for (let c=Math.min(pC0,sC0); c<=Math.max(pC1,sC1); c++) cols.add(c);
 
-    for (const r of rowsToCheck) {
-      for (const c of colsToCheck) {
-        const was = wasInSel(r,c), now = nowInSel(r,c);
-        const isActive = r === r1 && c === c1;
-        const isPrevActive = r === pr1 && c === pc1;
-        if (was !== now || isActive || isPrevActive) {
+    for (const r of rows) {
+      for (const c of cols) {
+        const was = wasIn(r,c), now = nowIn(r,c);
+        const isAct = r===r1&&c===c1, wasPrevAct = r===pr1&&c===pc1;
+        if (was!==now||isAct||wasPrevAct) {
           const td = this.cellEls[r]?.[c];
           if (!td) continue;
           const cell = this.currentSheet().cells[cellAddr(r,c)];
           const inClip = this.isInClipboard(r,c);
-          td.style.backgroundColor = now
-            ? (isActive ? "transparent" : "#d9e8f8")
-            : (cell?.style?.bg ?? "var(--background-primary)");
-          td.style.outline      = isActive ? "2px solid #1f78d1" : "none";
-          td.style.outlineOffset = isActive ? "-1px" : "0";
-          td.style.opacity      = (inClip && this.clipboard?.mode === "cut") ? "0.5" : "1";
-          td.style.borderColor  = inClip ? "#1f78d1" : "var(--background-modifier-border)";
-          td.style.borderStyle  = inClip ? "dashed" : "solid";
+          td.style.backgroundColor = cell?.style?.bg ?? "";
+          td.classList.toggle("eng-cell-selected", now && !isAct);
+          td.classList.toggle("eng-cell-active",   isAct);
+          td.style.opacity = (inClip && this.clipboard?.mode === "cut") ? "0.4" : "1";
+          td.classList.toggle("eng-cell-cut", inClip && this.clipboard?.mode === "cut");
         }
       }
     }
 
-    // Update row headers
+    // Row headers
     const allTrs = this.tbodyEl?.querySelectorAll("tr");
-    for (const r of rowsToCheck) {
-      const tr = allTrs?.[r];
-      const rh = tr?.querySelector("td") as HTMLElement | null;
+    for (const r of rows) {
+      const rh = allTrs?.[r]?.querySelector("td") as HTMLElement | null;
       if (!rh) continue;
-      const inSel = nowInSel(r, selC0); // any col in range
-      const wasIn = wasInSel(r, pC0);
-      if (inSel !== wasIn) {
-        rh.style.background = inSel ? "#bdd7ee" : "var(--background-secondary)";
-        rh.style.color      = inSel ? "#1f497d" : "var(--text-muted)";
-        rh.style.fontWeight = inSel ? "600"     : "400";
-      }
+      rh.classList.toggle("eng-hdr-sel", nowIn(r, sC0));
     }
-
-    // Update column headers
+    // Col headers
     const allThs = this.theadEl?.querySelectorAll("th");
-    for (const c of colsToCheck) {
-      const th = allThs?.[c+1] as HTMLElement | null; // +1 for corner
+    for (const c of cols) {
+      const th = allThs?.[c+1] as HTMLElement | null;
       if (!th) continue;
-      const inSel = nowInSel(selR0, c);
-      const wasIn = wasInSel(pR0, c);
-      if (inSel !== wasIn) {
-        th.style.background = inSel ? "#bdd7ee" : "var(--background-secondary)";
-        th.style.color      = inSel ? "#1f497d" : "var(--text-muted)";
-        th.style.fontWeight = inSel ? "600"     : "400";
-      }
+      th.classList.toggle("eng-hdr-sel", nowIn(sR0, c));
     }
 
     this.prevSel = { ...this.sel };
+    this.updateStatusBar();
+    this.updateFillHandle();
   }
-
-  // ─── Selection ────────────────────────────────────────────────────────────────
 
   private setSelection(r0: number, c0: number, r1: number, c1: number): void {
     const s = this.currentSheet();
@@ -858,7 +953,6 @@ export class EngSheetView extends FileView {
     this.updateSelection();
     this.refreshFormulaBar();
     this.syncFormatControls();
-    // Scroll active cell into view
     this.cellEls[this.sel.r1]?.[this.sel.c1]?.scrollIntoView({ block:"nearest", inline:"nearest" });
   }
 
@@ -869,6 +963,7 @@ export class EngSheetView extends FileView {
     this.sel.c1 = Math.max(0, Math.min(c, s.numCols-1));
     this.updateSelection();
     this.refreshFormulaBar();
+    this.updateStatusBar();
   }
 
   private selectAll(): void {
@@ -888,7 +983,7 @@ export class EngSheetView extends FileView {
     else this.setSelection(0, c, s.numRows-1, c);
   }
 
-  private startMouseSelect(startR: number, startC: number): void {
+  private startMouseSelect(_startR: number, _startC: number): void {
     const onMove = (e: MouseEvent) => {
       const el = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null;
       const td = el?.closest?.("td") as HTMLTableCellElement | null;
@@ -908,21 +1003,25 @@ export class EngSheetView extends FileView {
 
   private showContextMenu(e: MouseEvent): void {
     const menu = new Menu();
-    menu.addItem(i => i.setTitle("Cut (Ctrl+X)").onClick(()   => this.cutSelection()));
-    menu.addItem(i => i.setTitle("Copy (Ctrl+C)").onClick(()  => this.copySelectionFull()));
-    menu.addItem(i => i.setTitle("Paste (Ctrl+V)").onClick(() => this.pasteClipboard()));
+    menu.addItem(i => i.setTitle("Cut").setIcon("scissors").onClick(()     => this.cutSelection()));
+    menu.addItem(i => i.setTitle("Copy").setIcon("copy").onClick(()        => this.copySelectionFull()));
+    menu.addItem(i => i.setTitle("Paste").setIcon("clipboard").onClick(()  => this.pasteClipboard()));
     menu.addSeparator();
-    menu.addItem(i => i.setTitle("Insert row above").onClick(()  => this.insertRow()));
-    menu.addItem(i => i.setTitle("Insert row below").onClick(()  => this.insertRowBelow()));
-    menu.addItem(i => i.setTitle("Delete row(s)").onClick(()     => this.deleteRow()));
+    menu.addItem(i => i.setTitle("Insert row above").onClick(()   => this.insertRow()));
+    menu.addItem(i => i.setTitle("Insert row below").onClick(()   => this.insertRowBelow()));
+    menu.addItem(i => i.setTitle("Delete row(s)").onClick(()      => this.deleteRow()));
     menu.addSeparator();
     menu.addItem(i => i.setTitle("Insert column left").onClick(()  => this.insertCol()));
     menu.addItem(i => i.setTitle("Insert column right").onClick(() => this.insertColRight()));
     menu.addItem(i => i.setTitle("Delete column(s)").onClick(()    => this.deleteCol()));
     menu.addSeparator();
-    menu.addItem(i => i.setTitle("Clear contents (Delete)").onClick(() => this.clearSelection()));
+    menu.addItem(i => i.setTitle("Sort A → Z").setIcon("arrow-up-a-z").onClick(()   => this.sortColumn(true)));
+    menu.addItem(i => i.setTitle("Sort Z → A").setIcon("arrow-down-z-a").onClick(() => this.sortColumn(false)));
     menu.addSeparator();
-    menu.addItem(i => i.setTitle("Export cell to Variable Store…").onClick(() => this.promptExportCell()));
+    menu.addItem(i => i.setTitle("Clear contents").setIcon("eraser").onClick(()      => this.clearSelection()));
+    menu.addItem(i => i.setTitle("Clear formatting").setIcon("paintbrush").onClick(() => this.clearFormatting()));
+    menu.addSeparator();
+    menu.addItem(i => i.setTitle("Export to Variable Store…").setIcon("upload").onClick(() => this.promptExportCell()));
     menu.showAtMouseEvent(e);
   }
 
@@ -945,6 +1044,8 @@ export class EngSheetView extends FileView {
     }
     this.clipboard = { cells, mode:"copy", rows:sR1-sR0+1, cols:sC1-sC0+1, selR0:sR0,selR1:sR1,selC0:sC0,selC1:sC1 };
     navigator.clipboard?.writeText(lines.join("\n")).catch(()=>{});
+    const nCells = (sR1-sR0+1) * (sC1-sC0+1);
+    this.flashStatus(`Copied ${nCells} cell${nCells !== 1 ? "s" : ""} as TSV`);
   }
 
   private cutSelection(): void {
@@ -954,27 +1055,35 @@ export class EngSheetView extends FileView {
 
   private pasteClipboard(): void {
     if (!this.clipboard) return;
+    this.startUndoBatch();
     const { r1,c1 } = this.sel;
     const { cells,rows,cols,mode } = this.clipboard;
     const sheet = this.currentSheet();
     const affected: Array<[number,number]> = [];
     for (let dr=0; dr<rows; dr++) {
       for (let dc=0; dc<cols; dc++) {
+        const destR = r1+dr, destC = c1+dc;
+        const dest = cellAddr(destR, destC);
+        const before = sheet.cells[dest] ? JSON.parse(JSON.stringify(sheet.cells[dest])) as CellData : undefined;
         const src  = cells[cellAddr(dr,dc)];
-        const dest = cellAddr(r1+dr,c1+dc);
         if (src) sheet.cells[dest] = {...src};
         else delete sheet.cells[dest];
-        affected.push([r1+dr, c1+dc]);
+        this.recordCellChange(destR, destC, before);
+        affected.push([destR, destC]);
       }
     }
-    if (mode === "cut" && this.clipboard.selR0 !== undefined) {
+    if (mode==="cut" && this.clipboard.selR0 !== undefined) {
       for (let r=this.clipboard.selR0; r<=this.clipboard.selR1!; r++)
         for (let c=this.clipboard.selC0!; c<=this.clipboard.selC1!; c++) {
-          delete sheet.cells[cellAddr(r,c)];
+          const addr = cellAddr(r,c);
+          const before = sheet.cells[addr] ? JSON.parse(JSON.stringify(sheet.cells[addr])) as CellData : undefined;
+          delete sheet.cells[addr];
+          this.recordCellChange(r, c, before);
           affected.push([r,c]);
         }
       this.clipboard = null;
     }
+    this.commitUndoBatch();
     const hasFormulas = affected.some(([r,c]) => sheet.cells[cellAddr(r,c)]?.f);
     if (hasFormulas) { this.rebuildHF(); this.refreshAllCells(); }
     else { affected.forEach(([r,c]) => this.refreshCell(r,c)); }
@@ -983,24 +1092,46 @@ export class EngSheetView extends FileView {
 
   private isInClipboard(r: number, c: number): boolean {
     if (!this.clipboard || this.clipboard.selR0 === undefined) return false;
-    return r>=this.clipboard.selR0! && r<=this.clipboard.selR1! && c>=this.clipboard.selC0! && c<=this.clipboard.selC1!;
+    return r>=this.clipboard.selR0!&&r<=this.clipboard.selR1!&&c>=this.clipboard.selC0!&&c<=this.clipboard.selC1!;
   }
 
   private clearSelection(): void {
+    this.startUndoBatch();
     const { r0,c0,r1,c1 } = this.sel;
     const sheet = this.currentSheet();
     for (let r=Math.min(r0,r1); r<=Math.max(r0,r1); r++)
       for (let c=Math.min(c0,c1); c<=Math.max(c0,c1); c++) {
         const addr = cellAddr(r,c);
+        const before = sheet.cells[addr] ? JSON.parse(JSON.stringify(sheet.cells[addr])) as CellData : undefined;
         const cell = sheet.cells[addr];
-        if (cell?.style) sheet.cells[addr] = { v:null, f:null, style:cell.style };
+        if (cell?.style && Object.keys(cell.style).length > 0)
+          sheet.cells[addr] = { v:null, f:null, style:cell.style };
         else delete sheet.cells[addr];
+        this.recordCellChange(r, c, before);
         this.refreshCell(r,c);
       }
+    this.commitUndoBatch();
     this.markDirty();
   }
 
-  // ─── Cell editing ─────────────────────────────────────────────────────────────
+  private clearFormatting(): void {
+    this.startUndoBatch();
+    const { r0,c0,r1,c1 } = this.sel;
+    const sheet = this.currentSheet();
+    for (let r=Math.min(r0,r1); r<=Math.max(r0,r1); r++)
+      for (let c=Math.min(c0,c1); c<=Math.max(c0,c1); c++) {
+        const addr = cellAddr(r,c);
+        const before = sheet.cells[addr] ? JSON.parse(JSON.stringify(sheet.cells[addr])) as CellData : undefined;
+        if (sheet.cells[addr])
+          sheet.cells[addr] = { v:sheet.cells[addr].v, f:sheet.cells[addr].f };
+        this.recordCellChange(r, c, before);
+        this.refreshCell(r,c);
+      }
+    this.commitUndoBatch();
+    this.markDirty();
+  }
+
+  // ─── Editing ─────────────────────────────────────────────────────────────────
 
   private refreshFormulaBar(): void {
     const { r1,c1 } = this.sel;
@@ -1019,65 +1150,74 @@ export class EngSheetView extends FileView {
     const cell = this.currentSheet().cells[addr];
     const current = cell?.f ?? (cell?.v !== null && cell?.v !== undefined ? String(cell.v) : "");
 
-    // Save original content to restore on Escape
     const origContent = td.innerHTML;
-    const origStyle = { padding: td.style.padding, overflow: td.style.overflow };
-
+    const origPad     = td.style.padding;
     td.style.padding  = "0";
     td.style.overflow = "visible";
     td.innerHTML      = "";
 
-    const input = td.createEl("input") as HTMLInputElement;
+    const input = td.createEl("input", { cls: "eng-cell-edit-input" }) as HTMLInputElement;
     input.type  = "text";
+    input.spellcheck = false;
     input.value = initialChar !== null ? initialChar : current;
-    input.style.cssText = "width:100%;height:100%;min-width:80px;border:none;" +
-      "outline:2px solid #1f78d1;background:var(--background-primary);" +
-      "font-family:var(--font-monospace);font-size:12px;padding:0 3px;" +
-      "color:var(--text-normal);box-sizing:border-box";
     input.focus();
     if (initialChar === null) input.select(); else input.setSelectionRange(1,1);
 
     this.formulaInput.value = input.value;
     input.oninput = () => { this.formulaInput.value = input.value; };
 
+    // Restore cell to a clean state before refreshCell runs — otherwise the
+    // <input> element remains in the <td> after commit, appearing as a box over the value.
+    const restoreCell = () => {
+      td.empty();
+      td.style.padding  = origPad;
+      td.style.overflow = "hidden";
+    };
+
+    // Guards against double-commit: onblur can fire after Enter/Tab already called commit
+    let committed = false;
+
     const commit = (newR: number, newC: number) => {
+      if (committed) return;
+      committed = true;
       const val = input.value;
       this.editingCell = null;
+      restoreCell();
       this.setCellRaw(r, c, val);
-      // setCellRaw will refresh r,c — just move selection
       this.setSelection(newR, newC, newR, newC);
+      this.tableEl?.focus();
     };
 
     const cancel = () => {
+      committed = true;
       this.editingCell = null;
       td.innerHTML      = origContent;
-      td.style.padding  = origStyle.padding;
-      td.style.overflow = origStyle.overflow;
+      td.style.padding  = origPad;
+      td.style.overflow = "hidden";
       this.tableEl.focus();
     };
 
     input.onkeydown = (e) => {
-      if (e.key === "Enter")  { e.preventDefault(); e.stopPropagation(); commit(r+1, c); }
-      if (e.key === "Tab")    { e.preventDefault(); e.stopPropagation(); commit(r, c+(e.shiftKey?-1:1)); }
-      if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); cancel(); }
+      if (e.key==="Enter")  { e.preventDefault(); e.stopPropagation(); commit(r+1,c); }
+      if (e.key==="Tab")    { e.preventDefault(); e.stopPropagation(); commit(r,c+(e.shiftKey?-1:1)); }
+      if (e.key==="Escape") { e.preventDefault(); e.stopPropagation(); cancel(); }
     };
     input.onblur = () => {
-      if (this.editingCell?.r === r && this.editingCell?.c === c) {
+      if (committed) return;
+      if (this.editingCell?.r===r && this.editingCell?.c===c) {
+        committed = true;
         this.editingCell = null;
+        restoreCell();
         this.setCellRaw(r, c, input.value);
       }
     };
   }
 
-  /**
-   * Core cell update — called after every edit.
-   * Only rebuilds HyperFormula if the cell is a formula; otherwise just
-   * updates the cell in the data model and refreshes the single <td>.
-   */
   private setCellRaw(r: number, c: number, raw: string): void {
-    const addr   = cellAddr(r,c);
-    const sheet  = this.currentSheet();
+    const addr     = cellAddr(r,c);
+    const sheet    = this.currentSheet();
     const existing = sheet.cells[addr];
+    const before   = existing ? JSON.parse(JSON.stringify(existing)) as CellData : undefined;
     const wasFormula = !!existing?.f;
 
     if (!raw.trim()) {
@@ -1091,32 +1231,17 @@ export class EngSheetView extends FileView {
       sheet.cells[addr] = { v: isNaN(n) ? raw : n, f:null, style:existing?.style };
     }
 
-    const isFormula = !!sheet.cells[addr]?.f;
+    this.recordCellChange(r, c, before);
 
-    // Only rebuild HF if this is a formula cell (or was one)
+    const isFormula = !!sheet.cells[addr]?.f;
     if (isFormula || wasFormula) {
       this.updateHFCell(r, c);
-      // Dependents need refreshing too — for now refresh all formula cells
       this.refreshAllFormulaCells();
     } else {
-      // Plain value — just update this one cell
       this.refreshCell(r, c);
     }
-
     this.markDirty();
     this.refreshFormulaBar();
-  }
-
-  /** Refresh only cells that have formulas (not plain values). */
-  private refreshAllFormulaCells(): void {
-    const sheet = this.currentSheet();
-    for (const [addr, cell] of Object.entries(sheet.cells)) {
-      if (!cell?.f) continue;
-      const p = parseAddr(addr);
-      if (p) this.refreshCell(p.row, p.col);
-    }
-    // Also refresh the edited cell even if it's now plain
-    this.refreshCell(this.sel.r1, this.sel.c1);
   }
 
   // ─── Keyboard ─────────────────────────────────────────────────────────────────
@@ -1134,6 +1259,12 @@ export class EngSheetView extends FileView {
         case "u": e.preventDefault(); this.toggleFormat("underline"); return;
         case "s": e.preventDefault(); this.saveFile(); return;
         case "a": e.preventDefault(); this.selectAll(); return;
+        case "home": e.preventDefault(); this.setSelection(0,0,0,0); return;
+        case "z":
+          e.preventDefault();
+          if (e.shiftKey) this.redo(); else this.undo();
+          return;
+        case "y": e.preventDefault(); this.redo(); return;
       }
     }
     switch(e.key) {
@@ -1141,8 +1272,8 @@ export class EngSheetView extends FileView {
       case "ArrowDown":  e.preventDefault(); e.shiftKey?this.extendSelection(r1+1,c1):this.setSelection(r1+1,c1,r1+1,c1); break;
       case "ArrowLeft":  e.preventDefault(); e.shiftKey?this.extendSelection(r1,c1-1):this.setSelection(r1,c1-1,r1,c1-1); break;
       case "ArrowRight": e.preventDefault(); e.shiftKey?this.extendSelection(r1,c1+1):this.setSelection(r1,c1+1,r1,c1+1); break;
-      case "Tab":    e.preventDefault(); e.shiftKey?this.setSelection(r1,c1-1,r1,c1-1):this.setSelection(r1,c1+1,r1,c1+1); break;
-      case "Enter":  e.preventDefault(); e.shiftKey?this.setSelection(r1-1,c1,r1-1,c1):this.setSelection(r1+1,c1,r1+1,c1); break;
+      case "Tab":   e.preventDefault(); e.shiftKey?this.setSelection(r1,c1-1,r1,c1-1):this.setSelection(r1,c1+1,r1,c1+1); break;
+      case "Enter": e.preventDefault(); e.shiftKey?this.setSelection(r1-1,c1,r1-1,c1):this.setSelection(r1+1,c1,r1+1,c1); break;
       case "Delete": case "Backspace": e.preventDefault(); this.clearSelection(); break;
       case "F2": { e.preventDefault(); const td=this.cellEls[r1]?.[c1]; if(td) this.startEdit(r1,c1,td); break; }
       case "Escape": this.clipboard=null; break;
@@ -1152,16 +1283,20 @@ export class EngSheetView extends FileView {
   // ─── Formatting ───────────────────────────────────────────────────────────────
 
   private applyStyle(updater: (style: CellStyle) => void): void {
+    this.startUndoBatch();
     const { r0,c0,r1,c1 } = this.sel;
     const sheet = this.currentSheet();
     for (let r=Math.min(r0,r1); r<=Math.max(r0,r1); r++)
       for (let c=Math.min(c0,c1); c<=Math.max(c0,c1); c++) {
         const addr = cellAddr(r,c);
+        const before = sheet.cells[addr] ? JSON.parse(JSON.stringify(sheet.cells[addr])) as CellData : undefined;
         if (!sheet.cells[addr]) sheet.cells[addr] = { v:null, f:null };
         sheet.cells[addr].style ??= {};
         updater(sheet.cells[addr].style!);
         this.refreshCell(r,c);
+        this.recordCellChange(r, c, before);
       }
+    this.commitUndoBatch();
     this.markDirty();
     this.syncFormatControls();
   }
@@ -1172,10 +1307,106 @@ export class EngSheetView extends FileView {
     this.applyStyle(s => { s[prop] = !current; });
   }
 
+  private toggleWrap(): void {
+    const { r1,c1 } = this.sel;
+    const current = this.currentSheet().cells[cellAddr(r1,c1)]?.style?.wrap ?? false;
+    this.applyStyle(s => { s.wrap = !current; });
+  }
+
+  private applyBorder(border: "all"|"outer"|"none"): void {
+    this.applyStyle(s => { s.border = border; });
+    this.refreshSelectionCells();
+  }
+
   private syncFormatControls(): void {
     if (!this.fmtSelect) return;
     const cell = this.currentSheet().cells[cellAddr(this.sel.r1,this.sel.c1)];
     this.fmtSelect.value = cell?.style?.format ?? "General";
+    // Toggle active state on format buttons
+    const panel = this.ribbonPanels.home;
+    if (!panel) return;
+    panel.querySelectorAll<HTMLElement>("[data-fmt-btn]").forEach(el => {
+      const prop = el.dataset.fmtBtn as "bold"|"italic"|"underline"|"wrap";
+      el.classList.toggle("eng-rbn-btn-active", !!(cell?.style?.[prop]));
+    });
+  }
+
+  // ─── Sort ─────────────────────────────────────────────────────────────────────
+
+  private sortColumn(ascending: boolean): void {
+    this.startUndoBatch();
+    const { r0,c0,r1,c1 } = this.sel;
+    const sR0=Math.min(r0,r1), sR1=Math.max(r0,r1);
+    const minC=Math.min(c0,c1), maxC=Math.max(c0,c1);
+    const sortC = minC;
+    const sheet = this.currentSheet();
+
+    // Snapshot affected cells before sort
+    for (let r=sR0; r<=sR1; r++)
+      for (let c=minC; c<=maxC; c++) {
+        const addr = cellAddr(r,c);
+        const before = sheet.cells[addr] ? JSON.parse(JSON.stringify(sheet.cells[addr])) as CellData : undefined;
+        // record before; we'll call recordCellChange after the sort applies
+        if (this._batchEntry) this._batchEntry.changes.push({ r, c, sheetIdx: this.activeSheet, before, after: undefined });
+      }
+
+    const rows: Array<Record<number, CellData|undefined>> = [];
+    for (let r=sR0; r<=sR1; r++) {
+      const row: Record<number, CellData|undefined> = {};
+      for (let c=minC; c<=maxC; c++)
+        row[c] = sheet.cells[cellAddr(r,c)] ? {...sheet.cells[cellAddr(r,c)]} : undefined;
+      rows.push(row);
+    }
+
+    rows.sort((a, b) => {
+      const av = a[sortC]?.v ?? "";
+      const bv = b[sortC]?.v ?? "";
+      const an=Number(av), bn=Number(bv);
+      if (!isNaN(an)&&!isNaN(bn)) return ascending ? an-bn : bn-an;
+      return ascending
+        ? String(av).localeCompare(String(bv))
+        : String(bv).localeCompare(String(av));
+    });
+
+    for (let i=0; i<rows.length; i++) {
+      const r = sR0+i;
+      for (let c=minC; c<=maxC; c++) {
+        const cell = rows[i][c];
+        if (cell) sheet.cells[cellAddr(r,c)] = cell;
+        else delete sheet.cells[cellAddr(r,c)];
+      }
+    }
+
+    // Fill in the "after" snapshots now that sort has been applied
+    if (this._batchEntry) {
+      for (const ch of this._batchEntry.changes) {
+        if (ch.after === undefined) ch.after = sheet.cells[cellAddr(ch.r,ch.c)] ? JSON.parse(JSON.stringify(sheet.cells[cellAddr(ch.r,ch.c)])) : undefined;
+      }
+    }
+    this.commitUndoBatch();
+
+    this.rebuildHF();
+    this.refreshAllCells();
+    this.markDirty();
+  }
+
+  // ─── Freeze panes ────────────────────────────────────────────────────────────
+
+  private freezeRows(count: number): void {
+    const s = this.currentSheet();
+    s.frozen = { rows:count, cols:s.frozen?.cols ?? 0 };
+    this.switchSheet();
+  }
+
+  private freezeCols(count: number): void {
+    const s = this.currentSheet();
+    s.frozen = { rows:s.frozen?.rows ?? 0, cols:count };
+    this.switchSheet();
+  }
+
+  private unfreeze(): void {
+    this.currentSheet().frozen = { rows:0, cols:0 };
+    this.switchSheet();
   }
 
   // ─── Column resize ────────────────────────────────────────────────────────────
@@ -1205,7 +1436,7 @@ export class EngSheetView extends FileView {
     document.addEventListener("mouseup", onUp);
   }
 
-  // ─── Row / Column operations ──────────────────────────────────────────────────
+  // ─── Row / Column ops ─────────────────────────────────────────────────────────
 
   private shiftCells(sheet: SheetData, axis: "row"|"col", fromIdx: number, delta: 1|-1): Record<string,CellData> {
     const nc: Record<string,CellData> = {};
@@ -1213,7 +1444,7 @@ export class EngSheetView extends FileView {
       const p = parseAddr(addr);
       if (!p) continue;
       const key = axis==="row" ? p.row : p.col;
-      if (delta===1 && key>=fromIdx) nc[axis==="row"?cellAddr(p.row+1,p.col):cellAddr(p.row,p.col+1)] = cell;
+      if (delta===1 && key>=fromIdx)      nc[axis==="row"?cellAddr(p.row+1,p.col):cellAddr(p.row,p.col+1)] = cell;
       else if (delta===-1 && key===fromIdx) { /* deleted */ }
       else if (delta===-1 && key>fromIdx)  nc[axis==="row"?cellAddr(p.row-1,p.col):cellAddr(p.row,p.col-1)] = cell;
       else nc[addr] = cell;
@@ -1221,18 +1452,18 @@ export class EngSheetView extends FileView {
     return nc;
   }
 
-  // Row/col ops all rebuild grid since structure changes
-  private insertRow():      void { const r=Math.min(this.sel.r0,this.sel.r1); const s=this.currentSheet(); s.cells=this.shiftCells(s,"row",r,1); s.numRows++; this.switchSheet(); }
-  private insertRowBelow(): void { const r=Math.max(this.sel.r0,this.sel.r1)+1; const s=this.currentSheet(); s.cells=this.shiftCells(s,"row",r,1); s.numRows++; this.switchSheet(); }
-  private deleteRow():      void { const r=Math.min(this.sel.r0,this.sel.r1); const s=this.currentSheet(); s.cells=this.shiftCells(s,"row",r,-1); s.numRows=Math.max(1,s.numRows-1); this.switchSheet(); }
-  private insertCol():      void { const c=Math.min(this.sel.c0,this.sel.c1); const s=this.currentSheet(); s.cells=this.shiftCells(s,"col",c,1); s.numCols++; this.switchSheet(); }
-  private insertColRight(): void { const c=Math.max(this.sel.c0,this.sel.c1)+1; const s=this.currentSheet(); s.cells=this.shiftCells(s,"col",c,1); s.numCols++; this.switchSheet(); }
-  private deleteCol():      void { const c=Math.min(this.sel.c0,this.sel.c1); const s=this.currentSheet(); s.cells=this.shiftCells(s,"col",c,-1); s.numCols=Math.max(1,s.numCols-1); this.switchSheet(); }
+  private insertRow():      void { const r=Math.min(this.sel.r0,this.sel.r1);   const s=this.currentSheet(); s.cells=this.shiftCells(s,"row",r,1);  s.numRows++; this.switchSheet(); }
+  private insertRowBelow(): void { const r=Math.max(this.sel.r0,this.sel.r1)+1; const s=this.currentSheet(); s.cells=this.shiftCells(s,"row",r,1);  s.numRows++; this.switchSheet(); }
+  private deleteRow():      void { const r=Math.min(this.sel.r0,this.sel.r1);   const s=this.currentSheet(); s.cells=this.shiftCells(s,"row",r,-1); s.numRows=Math.max(1,s.numRows-1); this.switchSheet(); }
+  private insertCol():      void { const c=Math.min(this.sel.c0,this.sel.c1);   const s=this.currentSheet(); s.cells=this.shiftCells(s,"col",c,1);  s.numCols++; this.switchSheet(); }
+  private insertColRight(): void { const c=Math.max(this.sel.c0,this.sel.c1)+1; const s=this.currentSheet(); s.cells=this.shiftCells(s,"col",c,1);  s.numCols++; this.switchSheet(); }
+  private deleteCol():      void { const c=Math.min(this.sel.c0,this.sel.c1);   const s=this.currentSheet(); s.cells=this.shiftCells(s,"col",c,-1); s.numCols=Math.max(1,s.numCols-1); this.switchSheet(); }
 
-  // ─── Sheet operations ─────────────────────────────────────────────────────────
+  // ─── Sheet ops ────────────────────────────────────────────────────────────────
 
-  /** Full rebuild — used only on sheet switch or structural change (add/del row/col). */
   private switchSheet(): void {
+    this.undoStack = [];
+    this.redoStack = [];
     this.sel = { r0:0, c0:0, r1:0, c1:0 };
     this.prevSel = { ...this.sel };
     this.rebuildHF();
@@ -1277,7 +1508,7 @@ export class EngSheetView extends FileView {
     const addr = cellAddr(r1,c1);
     const cell = this.currentSheet().cells[addr];
     const existing = cell?.f?.match(/EXPORT\s*\(\s*[^,]+\s*,\s*["']([^"']+)["']/i)?.[1] ?? "";
-    const varName = prompt(`Export cell ${addr} to Variable Store.\nEnter variable name (leave empty to remove):`, existing);
+    const varName = prompt(`Export cell ${addr} to Variable Store.\nVariable name (empty to remove):`, existing);
     if (varName === null) return;
     if (!varName.trim()) {
       const inner = cell?.f?.match(/EXPORT\s*\(\s*([^,]+)\s*,/i)?.[1]?.trim();
@@ -1291,7 +1522,394 @@ export class EngSheetView extends FileView {
     new Notice(`${addr} → Variable Store as "${varName.trim()}"`);
   }
 
-  // ─── Helpers ──────────────────────────────────────────────────────────────────
+  // ─── Autofill ────────────────────────────────────────────────────────────────
+
+  private updateFillHandle(): void {
+    this.fillHandleEl?.remove();
+    this.fillHandleEl = null;
+    const { r0,c0,r1,c1 } = this.sel;
+    const maxR = Math.max(r0,r1), maxC = Math.max(c0,c1);
+    const td = this.cellEls[maxR]?.[maxC];
+    if (!td) return;
+    const handle = document.createElement("div");
+    handle.className = "eng-fill-handle";
+    td.appendChild(handle);
+    this.fillHandleEl = handle;
+    handle.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this.startAutofill();
+    });
+  }
+
+  private startAutofill(): void {
+    const { r0,c0,r1,c1 } = this.sel;
+    const sR0=Math.min(r0,r1), sR1=Math.max(r0,r1);
+    const sC0=Math.min(c0,c1), sC1=Math.max(c0,c1);
+    let lastR = sR1, lastC = sC1;
+
+    const onMove = (e: MouseEvent) => {
+      const el = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null;
+      const td = el?.closest?.("td") as HTMLTableCellElement | null;
+      if (!td || td.closest("table") !== this.tableEl) return;
+      const tr = td.closest("tr") as HTMLTableRowElement;
+      const allRows = [...this.tbodyEl.querySelectorAll("tr")] as HTMLTableRowElement[];
+      const r = allRows.indexOf(tr);
+      const c = [...tr.querySelectorAll("td")].indexOf(td) - 1;
+      if (r < 0 || c < 0) return;
+      lastR = r; lastC = c;
+      this.updateFillPreview(sR0, sC0, sR1, sC1, r, c);
+    };
+
+    const onUp = () => {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      this.clearFillPreview();
+      this.doAutofill(sR0, sC0, sR1, sC1, lastR, lastC);
+    };
+
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  }
+
+  private updateFillPreview(sR0: number, sC0: number, sR1: number, sC1: number, targetR: number, targetC: number): void {
+    this.clearFillPreview();
+    const drDown  = targetR - sR1;
+    const drRight = targetC - sC1;
+    if (drDown > 0) {
+      for (let r=sR1+1; r<=targetR; r++)
+        for (let c=sC0; c<=sC1; c++) {
+          const td = this.cellEls[r]?.[c];
+          if (td) { td.classList.add("eng-fill-preview"); this.fillPreviewCells.push(td); }
+        }
+    } else if (drRight > 0) {
+      for (let c=sC1+1; c<=targetC; c++)
+        for (let r=sR0; r<=sR1; r++) {
+          const td = this.cellEls[r]?.[c];
+          if (td) { td.classList.add("eng-fill-preview"); this.fillPreviewCells.push(td); }
+        }
+    }
+  }
+
+  private clearFillPreview(): void {
+    for (const td of this.fillPreviewCells) td.classList.remove("eng-fill-preview");
+    this.fillPreviewCells = [];
+  }
+
+  private doAutofill(sR0: number, sC0: number, sR1: number, sC1: number, targetR: number, targetC: number): void {
+    const sheet = this.currentSheet();
+    const fillDown  = targetR > sR1;
+    const fillRight = targetC > sC1;
+    if (!fillDown && !fillRight) return;
+    this.startUndoBatch();
+
+    if (fillDown) {
+      const srcRows = sR1 - sR0 + 1;
+      for (let r = sR1+1; r <= targetR; r++) {
+        const srcR = sR0 + ((r - sR1 - 1) % srcRows);
+        const dr   = r - srcR;
+        for (let c = sC0; c <= sC1; c++) {
+          const dest = cellAddr(r, c);
+          const before = sheet.cells[dest] ? JSON.parse(JSON.stringify(sheet.cells[dest])) as CellData : undefined;
+          const src  = sheet.cells[cellAddr(srcR, c)];
+          if (!src) { delete sheet.cells[dest]; }
+          else if (src.f) { sheet.cells[dest] = { ...src, f: this.adjustFormula(src.f, dr, 0) }; }
+          else if (typeof src.v === "number") { const step = this.detectStep(sR0, sR1, c, "row", sheet); sheet.cells[dest] = { ...src, v: src.v + step * (r - srcR) }; }
+          else { sheet.cells[dest] = { ...src }; }
+          this.recordCellChange(r, c, before);
+        }
+      }
+    } else {
+      const srcCols = sC1 - sC0 + 1;
+      for (let c = sC1+1; c <= targetC; c++) {
+        const srcC = sC0 + ((c - sC1 - 1) % srcCols);
+        const dc   = c - srcC;
+        for (let r = sR0; r <= sR1; r++) {
+          const dest = cellAddr(r, c);
+          const before = sheet.cells[dest] ? JSON.parse(JSON.stringify(sheet.cells[dest])) as CellData : undefined;
+          const src  = sheet.cells[cellAddr(r, srcC)];
+          if (!src) { delete sheet.cells[dest]; }
+          else if (src.f) { sheet.cells[dest] = { ...src, f: this.adjustFormula(src.f, 0, dc) }; }
+          else if (typeof src.v === "number") { const step = this.detectStep(sC0, sC1, r, "col", sheet); sheet.cells[dest] = { ...src, v: src.v + step * (c - srcC) }; }
+          else { sheet.cells[dest] = { ...src }; }
+          this.recordCellChange(r, c, before);
+        }
+      }
+    }
+
+    this.commitUndoBatch();
+    this.rebuildHF();
+    this.refreshAllCells();
+    this.updateFillHandle();
+    this.markDirty();
+  }
+
+  private detectStep(from: number, to: number, fixedIdx: number, axis: "row"|"col", sheet: SheetData): number {
+    if (from >= to) return 0;
+    const vals: number[] = [];
+    for (let i = from; i <= to; i++) {
+      const addr = axis === "row" ? cellAddr(i, fixedIdx) : cellAddr(fixedIdx, i);
+      const v = sheet.cells[addr]?.v;
+      if (typeof v !== "number") return 0;
+      vals.push(v);
+    }
+    if (vals.length < 2) return 0;
+    const step = vals[1] - vals[0];
+    for (let i = 2; i < vals.length; i++) {
+      if (Math.abs((vals[i] - vals[i-1]) - step) > 1e-10) return 0;
+    }
+    return step;
+  }
+
+  private adjustFormula(formula: string, deltaRow: number, deltaCol: number): string {
+    if (!formula.startsWith("=") || (deltaRow === 0 && deltaCol === 0)) return formula;
+    return "=" + formula.slice(1).replace(
+      /(\$?)([A-Z]+)(\$?)(\d+)/gi,
+      (full, absCol, colStr, absRow, rowStr) => {
+        if (absCol && absRow) return full; // fully absolute — unchanged
+        let colIdx = 0;
+        for (const ch of colStr.toUpperCase()) colIdx = colIdx * 26 + ch.charCodeAt(0) - 64;
+        colIdx--; // 0-based
+        const newCol = absCol ? colStr.toUpperCase() : colLetter(Math.max(0, colIdx + deltaCol));
+        const newRow = absRow ? rowStr : String(Math.max(1, parseInt(rowStr) + deltaRow));
+        return `${absCol}${newCol}${absRow}${newRow}`;
+      }
+    );
+  }
+
+  // ─── CSV import / export ─────────────────────────────────────────────────────
+
+  private importCSV(): void {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".csv,text/csv";
+    input.onchange = () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        const text = reader.result as string;
+        const rows = this.parseDelimited(text, ",");
+        if (rows.length === 0) { new Notice("CSV file appears to be empty."); return; }
+        this.setSelection(this.sel.r1, this.sel.c1, this.sel.r1, this.sel.c1);
+        this.pasteExternalData(rows);
+        new Notice(`Imported ${rows.length} row${rows.length !== 1 ? "s" : ""} from ${file.name}`);
+      };
+      reader.readAsText(file);
+    };
+    input.click();
+  }
+
+  private exportCSV(): void {
+    const sheet = this.currentSheet();
+    const { r0,c0,r1,c1 } = this.sel;
+    const sR0=Math.min(r0,r1), sR1=Math.max(r0,r1);
+    const sC0=Math.min(c0,c1), sC1=Math.max(c0,c1);
+    const isRange = sR0 !== sR1 || sC0 !== sC1;
+
+    let minR: number, maxR: number, minC: number, maxC: number;
+    if (isRange) {
+      minR = sR0; maxR = sR1; minC = sC0; maxC = sC1;
+    } else {
+      const addrs = Object.keys(sheet.cells);
+      if (addrs.length === 0) { new Notice("No data to export."); return; }
+      minR = Infinity; maxR = 0; minC = Infinity; maxC = 0;
+      for (const addr of addrs) {
+        const p = parseAddr(addr);
+        if (!p) continue;
+        if (p.row < minR) minR = p.row; if (p.row > maxR) maxR = p.row;
+        if (p.col < minC) minC = p.col; if (p.col > maxC) maxC = p.col;
+      }
+    }
+
+    const data: string[][] = [];
+    for (let r = minR; r <= maxR; r++) {
+      const row: string[] = [];
+      for (let c = minC; c <= maxC; c++) {
+        const val = this.getComputedValue(r, c);
+        row.push(val !== null && val !== undefined ? String(val) : "");
+      }
+      data.push(row);
+    }
+
+    const csv  = this.serializeDelimited(data, ",");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const a    = document.createElement("a");
+    a.href     = URL.createObjectURL(blob);
+    a.download = `${this.file?.basename ?? "sheet"}.csv`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
+  // ─── External paste (TSV / CSV from clipboard or file) ───────────────────────
+
+  private pasteExternalData(rows: string[][]): void {
+    if (rows.length === 0) return;
+    this.startUndoBatch();
+    const { r1,c1 } = this.sel;
+    const sheet = this.currentSheet();
+    let hasFormula = false;
+
+    for (let dr = 0; dr < rows.length; dr++) {
+      for (let dc = 0; dc < rows[dr].length; dc++) {
+        const r = r1 + dr, c = c1 + dc;
+        if (r >= sheet.numRows || c >= sheet.numCols) continue;
+        const addr = cellAddr(r, c);
+        const before = sheet.cells[addr] ? JSON.parse(JSON.stringify(sheet.cells[addr])) as CellData : undefined;
+        const raw = rows[dr][dc];
+        if (!raw.trim()) {
+          delete sheet.cells[addr];
+        } else if (raw.startsWith("=")) {
+          sheet.cells[addr] = { v: null, f: raw };
+          hasFormula = true;
+        } else {
+          const n = Number(raw);
+          sheet.cells[addr] = { v: isNaN(n) ? raw : n, f: null };
+        }
+        this.recordCellChange(r, c, before);
+      }
+    }
+
+    this.commitUndoBatch();
+    if (hasFormula) { this.rebuildHF(); this.refreshAllCells(); }
+    else {
+      for (let dr = 0; dr < rows.length; dr++)
+        for (let dc = 0; dc < rows[dr].length; dc++) {
+          const r = r1+dr, c = c1+dc;
+          if (r < sheet.numRows && c < sheet.numCols) this.refreshCell(r, c);
+        }
+    }
+    this.markDirty();
+  }
+
+  // ─── Delimited text parsing / serialization ───────────────────────────────────
+
+  /** RFC 4180-compliant parser. Handles quoted fields, escaped quotes, \r\n and \n. */
+  private parseDelimited(text: string, delimiter: "," | "\t"): string[][] {
+    const rows: string[][] = [];
+    let row: string[] = [];
+    let field = "";
+    let inQuotes = false;
+    let i = 0;
+    const n = text.length;
+
+    while (i < n) {
+      const ch = text[i];
+      if (inQuotes) {
+        if (ch === '"') {
+          if (i + 1 < n && text[i + 1] === '"') { field += '"'; i += 2; }
+          else { inQuotes = false; i++; }
+        } else { field += ch; i++; }
+      } else {
+        if (ch === '"') { inQuotes = true; i++; }
+        else if (ch === delimiter) { row.push(field); field = ""; i++; }
+        else if (ch === "\r" && i + 1 < n && text[i + 1] === "\n") {
+          row.push(field); rows.push(row); row = []; field = ""; i += 2;
+        } else if (ch === "\n") {
+          row.push(field); rows.push(row); row = []; field = ""; i++;
+        } else { field += ch; i++; }
+      }
+    }
+
+    if (field || row.length > 0) { row.push(field); rows.push(row); }
+
+    // Drop trailing all-empty row (common artifact of trailing newline)
+    if (rows.length > 0 && rows[rows.length - 1].every(c => c === "")) rows.pop();
+
+    return rows;
+  }
+
+  /** Serialize a 2D string array to delimited text (RFC 4180). */
+  private serializeDelimited(data: string[][], delimiter: "," | "\t"): string {
+    return data.map(row =>
+      row.map(field => {
+        const needs = field.includes(delimiter) || field.includes('"') ||
+                      field.includes("\n") || field.includes("\r");
+        return needs ? '"' + field.replace(/"/g, '""') + '"' : field;
+      }).join(delimiter)
+    ).join("\r\n");
+  }
+
+  // ─── Status flash ─────────────────────────────────────────────────────────────
+
+  private _flashTimer: ReturnType<typeof setTimeout> | null = null;
+
+  private flashStatus(text: string, ms = 1800): void {
+    if (this._flashTimer) clearTimeout(this._flashTimer);
+    this.setStatusLeft(text);
+    this._flashTimer = setTimeout(() => {
+      this._flashTimer = null;
+      this.setStatusLeft(this.isDirty ? "Saving…" : "Autosaved");
+    }, ms);
+  }
+
+  // ─── Undo / Redo ─────────────────────────────────────────────────────────────
+
+  private startUndoBatch(): void {
+    this._batchEntry = { changes: [] };
+  }
+
+  private commitUndoBatch(): void {
+    if (!this._batchEntry) return;
+    if (this._batchEntry.changes.length > 0) this.pushUndo(this._batchEntry);
+    this._batchEntry = null;
+  }
+
+  private recordCellChange(r: number, c: number, before: CellData | undefined): void {
+    const after = this.currentSheet().cells[cellAddr(r, c)];
+    const change: UndoChange = {
+      r, c, sheetIdx: this.activeSheet,
+      before: before ? JSON.parse(JSON.stringify(before)) : undefined,
+      after:  after  ? JSON.parse(JSON.stringify(after))  : undefined,
+    };
+    if (this._batchEntry) this._batchEntry.changes.push(change);
+    else this.pushUndo({ changes: [change] });
+  }
+
+  private pushUndo(entry: UndoEntry): void {
+    if (entry.changes.length === 0) return;
+    this.undoStack.push(entry);
+    if (this.undoStack.length > 50) this.undoStack.shift();
+    this.redoStack = [];
+  }
+
+  private applyUndoEntry(entry: UndoEntry, reverse: boolean): void {
+    const changes = reverse ? [...entry.changes].reverse() : entry.changes;
+    for (const ch of changes) {
+      const sheet = this.fileData.sheets[ch.sheetIdx];
+      if (!sheet) continue;
+      const addr = cellAddr(ch.r, ch.c);
+      const data = reverse ? ch.before : ch.after;
+      if (data) sheet.cells[addr] = JSON.parse(JSON.stringify(data));
+      else delete sheet.cells[addr];
+    }
+  }
+
+  undo(): void {
+    const entry = this.undoStack.pop();
+    if (!entry) return;
+    this.applyUndoEntry(entry, true);
+    this.redoStack.push(entry);
+    this.afterUndoRedo();
+  }
+
+  redo(): void {
+    const entry = this.redoStack.pop();
+    if (!entry) return;
+    this.applyUndoEntry(entry, false);
+    this.undoStack.push(entry);
+    this.afterUndoRedo();
+  }
+
+  private afterUndoRedo(): void {
+    this.rebuildHF();
+    this.refreshAllCells();
+    this.refreshFormulaBar();
+    this.updateStatusBar();
+    this.markDirty();
+  }
+
+  // ─── Helper ───────────────────────────────────────────────────────────────────
 
   private currentSheet(): SheetData {
     return this.fileData.sheets[this.activeSheet] ?? this.fileData.sheets[0];

@@ -64,6 +64,9 @@ export class MathEngine {
   private rerenderTimer: ReturnType<typeof setTimeout> | null = null;
   tagResolver?: TagResolver;
 
+  calcColor = "teal";
+  errColor  = "red";
+
   /**
    * Cache of filePath → full file content.
    * Populated by cacheFileSource() (called from parseAllFiles and the vault
@@ -145,39 +148,42 @@ export class MathEngine {
     const mathEls = Array.from(el.querySelectorAll<HTMLElement>(".math"));
     if (mathEls.length === 0) return;
 
-    // Try getSectionInfo first — works for some element types in some versions
     let source = "";
     const info = ctx.getSectionInfo(el);
     if (info?.text) {
+      // getSectionInfo succeeded — use only this section's lines.
+      // If those lines contain no <<, this section has no substitutions: skip.
+      // Do NOT fall back to full-file source; that would contaminate this section
+      // with << patterns from other sections and render them in the wrong block.
       source = info.text.split("\n").slice(info.lineStart, info.lineEnd + 1).join("\n");
-    }
-
-    // Fall back to full file source from cache
-    if (!source.includes("<<")) {
+      if (!source.includes("<<")) return;
+    } else {
+      // getSectionInfo gave nothing — fall back to full file cache.
       source = this.fileSourceCache.get(sourcePath) ?? "";
+      if (!source.includes("<<")) return;
     }
 
-    if (!source.includes("<<")) return;
-
-    // Build ordered list of math spans containing << from source
-    const spans: Array<{ latex: string; isBlock: boolean; index: number }> = [];
+    // Build ALL math spans (with and without <<) so index into blockEls/inlineEls
+    // stays aligned with the rendered .math elements. Only process those with hasSubst.
+    const spans: Array<{ latex: string; isBlock: boolean; index: number; hasSubst: boolean }> = [];
     let m: RegExpExecArray | null;
 
     DISPLAY_MATH_REGEX.lastIndex = 0;
     while ((m = DISPLAY_MATH_REGEX.exec(source)) !== null) {
-      if (m[1].includes("<<")) spans.push({ latex: m[1], isBlock: true, index: m.index });
+      spans.push({ latex: m[1], isBlock: true, index: m.index, hasSubst: m[1].includes("<<") });
     }
 
     INLINE_MATH_REGEX.lastIndex = 0;
     while ((m = INLINE_MATH_REGEX.exec(source)) !== null) {
-      if (m[1].includes("<<")) spans.push({ latex: m[1], isBlock: false, index: m.index });
+      spans.push({ latex: m[1], isBlock: false, index: m.index, hasSubst: m[1].includes("<<") });
     }
 
     // Sort by position so they match rendered elements in source order
     spans.sort((a, b) => a.index - b.index);
-    if (spans.length === 0) return;
+    if (!spans.some(s => s.hasSubst)) return;
 
-    // Match spans to rendered .math elements by type and order
+    // Match spans to rendered .math elements by type and order.
+    // Advance bi/ii for EVERY span so pure-LaTeX spans consume their slot.
     const blockEls = mathEls.filter(e => e.classList.contains("math-block"));
     const inlineEls = mathEls.filter(e => e.classList.contains("math-inline"));
     let bi = 0, ii = 0;
@@ -186,7 +192,7 @@ export class MathEngine {
 
     for (const span of spans) {
       const target = span.isBlock ? blockEls[bi++] : inlineEls[ii++];
-      if (!target) continue;
+      if (!target || !span.hasSubst) continue;
 
       const { latex: substituted, assignments } = this.substituteInLatex(span.latex, sourcePath);
       this.commitAssignments(assignments, sourcePath);
@@ -319,7 +325,7 @@ export class MathEngine {
           s = `${mantissa} \\times 10^{${exp}}`;
         }
       }
-      return `{\\color{teal}{${s}}}${unitStr}`;
+      return `{\\color{${this.toLatexColor(this.calcColor)}}{${s}}}${unitStr}`;
     }
 
     if (typeof value === "string") return `\\text{${value}}${unitStr}`;
@@ -329,6 +335,13 @@ export class MathEngine {
     }
 
     return String(value);
+  }
+
+  private toLatexColor(color: string): string {
+    // Hex #RRGGBB → [HTML]{RRGGBB} for xcolor; named colors pass through
+    const hex = color.match(/^#([0-9a-fA-F]{6})$/);
+    if (hex) return `[HTML]{${hex[1].toUpperCase()}}`;
+    return color;
   }
 
   private applySpec(value: number, spec: string): string {
@@ -356,7 +369,7 @@ export class MathEngine {
 
   private errPlaceholder(expr: string): string {
     const safe = expr.replace(/[\\{}_^$&%#]/g, "?").slice(0, 24);
-    return `\\textcolor{red}{\\text{? ${safe}}}`;
+    return `\\textcolor{${this.toLatexColor(this.errColor)}}{\\text{? ${safe}}}`;
   }
 
   // ─── Rerender ──────────────────────────────────────────────────────────────

@@ -34,6 +34,10 @@ interface EngineerPluginSettings {
   panelShowParentFolderSection: boolean;
   panelShowTagSection: boolean;
   panelShowGlobalSection: boolean;
+  mathCalcColor: string;
+  mathErrorColor: string;
+  pythonRunOnParseEnabled: boolean;
+  pythonShowExportTable: boolean;
 }
 
 const DEFAULT_SETTINGS: EngineerPluginSettings = {
@@ -41,6 +45,10 @@ const DEFAULT_SETTINGS: EngineerPluginSettings = {
   defaultSigFigs: 4,
   showUnitsInMath: true,
   parseOnStartup: true,
+  mathCalcColor: "teal",
+  mathErrorColor: "red",
+  pythonRunOnParseEnabled: true,
+  pythonShowExportTable: true,
   panelShowActiveNoteSection: true,
   panelShowLocalSection: true,
   panelShowFolderSection: true,
@@ -67,9 +75,13 @@ export default class EngineerPlugin extends Plugin {
 
     this.varsParser = new VarsBlockParser(this.app, this.store);
     this.mathEngine = new MathEngine(this, this.store);
+    this.mathEngine.calcColor = this.settings.mathCalcColor;
+    this.mathEngine.errColor  = this.settings.mathErrorColor;
     this.mathEngine.register();
 
     this.pythonEngine = new PythonEngine(this.store);
+    this.pythonEngine.runOnParseEnabled = this.settings.pythonRunOnParseEnabled;
+    this.pythonEngine.showExportTable   = this.settings.pythonShowExportTable;
     this.registerMarkdownCodeBlockProcessor(
       "python",
       (source, el, ctx) => this.pythonEngine.render(source, el, ctx)
@@ -169,6 +181,8 @@ export default class EngineerPlugin extends Plugin {
         // Keep the math engine's source cache fresh for inline substitution
         this.mathEngine.cacheFileSource(file.path, content);
         if (content.includes("---vars")) this.varsParser.parseAndLoad(content, file.path);
+        if (this.settings.pythonRunOnParseEnabled && content.includes("```python"))
+          this.pythonEngine.runOnParseBlocks(content, file.path);
       })
     );
 
@@ -261,6 +275,7 @@ export default class EngineerPlugin extends Plugin {
   async parseAllFiles(): Promise<void> {
     const files = this.app.vault.getMarkdownFiles();
     let count = 0;
+    const pythonPromises: Promise<void>[] = [];
     for (const file of files) {
       const content = await this.app.vault.read(file);
       this.mathEngine.cacheFileSource(file.path, content);
@@ -268,7 +283,11 @@ export default class EngineerPlugin extends Plugin {
         this.varsParser.parseAndLoad(content, file.path);
         count++;
       }
+      if (this.settings.pythonRunOnParseEnabled && content.includes("```python")) {
+        pythonPromises.push(this.pythonEngine.runOnParseBlocks(content, file.path));
+      }
     }
+    if (pythonPromises.length > 0) await Promise.all(pythonPromises);
     console.log(`[Engineer] Parsed ${count} files with variable blocks.`);
   }
 
@@ -318,6 +337,56 @@ class EngineerSettingsTab extends PluginSettingTab {
         .onChange(async value => {
           this.plugin.settings.parseOnStartup = value;
           await this.plugin.saveSettings();
+        }));
+
+    containerEl.createEl("h3", { text: "Math rendering" });
+
+    new Setting(containerEl)
+      .setName("Calculation result color")
+      .setDesc("Color for computed values in math blocks. Accepts CSS color names (teal, blue) or hex (#00897B).")
+      .addText(text => text.setPlaceholder("teal")
+        .setValue(this.plugin.settings.mathCalcColor)
+        .onChange(async value => {
+          this.plugin.settings.mathCalcColor = value.trim() || "teal";
+          await this.plugin.saveSettings();
+          this.plugin.mathEngine.calcColor = this.plugin.settings.mathCalcColor;
+          this.plugin.mathEngine.rerenderAll();
+        }));
+
+    new Setting(containerEl)
+      .setName("Error placeholder color")
+      .setDesc("Color for unresolved or errored expressions. Accepts CSS color names or hex.")
+      .addText(text => text.setPlaceholder("red")
+        .setValue(this.plugin.settings.mathErrorColor)
+        .onChange(async value => {
+          this.plugin.settings.mathErrorColor = value.trim() || "red";
+          await this.plugin.saveSettings();
+          this.plugin.mathEngine.errColor = this.plugin.settings.mathErrorColor;
+          this.plugin.mathEngine.rerenderAll();
+        }));
+
+    containerEl.createEl("h3", { text: "Python" });
+
+    new Setting(containerEl)
+      .setName("Run #runOnParse blocks automatically")
+      .setDesc("When enabled, python blocks containing `# runOnParse` are executed on startup and when the file is saved.")
+      .addToggle(toggle => toggle
+        .setValue(this.plugin.settings.pythonRunOnParseEnabled)
+        .onChange(async value => {
+          this.plugin.settings.pythonRunOnParseEnabled = value;
+          await this.plugin.saveSettings();
+          this.plugin.pythonEngine.runOnParseEnabled = value;
+        }));
+
+    new Setting(containerEl)
+      .setName("Show \"Exported to store\" table")
+      .setDesc("Show the variable summary table below Python output after a successful run.")
+      .addToggle(toggle => toggle
+        .setValue(this.plugin.settings.pythonShowExportTable)
+        .onChange(async value => {
+          this.plugin.settings.pythonShowExportTable = value;
+          await this.plugin.saveSettings();
+          this.plugin.pythonEngine.showExportTable = value;
         }));
 
     containerEl.createEl("h3", { text: "Variable Panel sections" });
