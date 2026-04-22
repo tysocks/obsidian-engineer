@@ -22,6 +22,9 @@ import { MathEngine } from "./MathEngine";
 import { EngSheetView, ENGSHEET_VIEW_TYPE, ENGSHEET_EXTENSION } from "./EngSheetView";
 import { VariablePanel, VARIABLE_PANEL_VIEW_TYPE } from "./VariablePanel";
 import { PythonEngine } from "./PythonEngine";
+import { EngTableRenderer } from "./EngTableRenderer";
+import { EngPlotRenderer } from "./EngPlotRenderer";
+import { UnitEngine } from "./UnitEngine";
 
 interface EngineerPluginSettings {
   autosaveIntervalSeconds: number;
@@ -38,6 +41,8 @@ interface EngineerPluginSettings {
   mathErrorColor: string;
   pythonRunOnParseEnabled: boolean;
   pythonShowExportTable: boolean;
+  engTableShowSourceCaption: boolean;
+  enableVariableReferenceGraph: boolean;
 }
 
 const DEFAULT_SETTINGS: EngineerPluginSettings = {
@@ -49,6 +54,8 @@ const DEFAULT_SETTINGS: EngineerPluginSettings = {
   mathErrorColor: "red",
   pythonRunOnParseEnabled: true,
   pythonShowExportTable: true,
+  engTableShowSourceCaption: true,
+  enableVariableReferenceGraph: true,
   panelShowActiveNoteSection: true,
   panelShowLocalSection: true,
   panelShowFolderSection: true,
@@ -63,6 +70,9 @@ export default class EngineerPlugin extends Plugin {
   varsParser!: VarsBlockParser;
   mathEngine!: MathEngine;
   pythonEngine!: PythonEngine;
+  engTableRenderer!: EngTableRenderer;
+  engPlotRenderer!: EngPlotRenderer;
+  unitEngine!: UnitEngine;
   private autosaveInterval?: ReturnType<typeof setInterval>;
 
   async onload(): Promise<void> {
@@ -111,6 +121,23 @@ export default class EngineerPlugin extends Plugin {
       },
     });
 
+    this.addCommand({
+      id: "copy-engtable-reference",
+      name: "Copy engtable reference from current selection",
+      checkCallback: (checking) => {
+        const active = this.app.workspace.getActiveViewOfType(EngSheetView);
+        if (!active) return false;
+        if (!checking) {
+          const fence = active.buildEngTableFence();
+          navigator.clipboard.writeText(fence).then(
+            () => new Notice("Copied engtable reference."),
+            () => new Notice("Failed to copy engtable reference.")
+          );
+        }
+        return true;
+      },
+    });
+
     const tagResolver = (filePath: string): string[] => {
       const cache = this.app.metadataCache.getCache(filePath);
       if (!cache) return [];
@@ -143,6 +170,16 @@ export default class EngineerPlugin extends Plugin {
     this.mathEngine.tagResolver = tagResolver;
     this.varsParser.tagResolver = tagResolver;
     this.pythonEngine.tagResolver = tagResolver;
+    this.engTableRenderer = new EngTableRenderer(
+      this,
+      this.store,
+      tagResolver,
+      () => this.settings.engTableShowSourceCaption
+    );
+    this.engTableRenderer.register();
+    this.engPlotRenderer = new EngPlotRenderer(this, this.store, tagResolver);
+    this.engPlotRenderer.register();
+    this.unitEngine = new UnitEngine(this.app, this.store);
 
     const getPanelConfig = () => ({
       showActiveNoteSection: this.settings.panelShowActiveNoteSection,
@@ -155,7 +192,13 @@ export default class EngineerPlugin extends Plugin {
 
     this.registerView(
       VARIABLE_PANEL_VIEW_TYPE,
-      (leaf) => new VariablePanel(leaf, this.store, tagResolver, getPanelConfig)
+      (leaf) => new VariablePanel(
+        leaf,
+        this.store,
+        tagResolver,
+        getPanelConfig,
+        () => this.settings.enableVariableReferenceGraph
+      )
     );
 
     // {x} icon — braces with variable cross. addIcon wraps content in <svg viewBox="0 0 100 100">
@@ -187,11 +230,33 @@ export default class EngineerPlugin extends Plugin {
     );
 
     this.registerEvent(
+      this.app.vault.on("modify", (file) => {
+        if (!(file instanceof TFile)) return;
+        if (file.extension !== "engsheet" && file.extension !== "csv") return;
+        this.engTableRenderer.scheduleRerender();
+        this.engPlotRenderer.scheduleRerender();
+      })
+    );
+
+    this.registerEvent(
       this.app.vault.on("delete", (file) => {
         if (file instanceof TFile) {
           this.store.clearFromSource(file.path);
           this.mathEngine.fileSourceCache.delete(file.path);
+          if (file.extension === "engsheet" || file.extension === "csv" || file.extension === "md") {
+            this.engTableRenderer.scheduleRerender();
+            this.engPlotRenderer.scheduleRerender();
+          }
         }
+      })
+    );
+
+    this.registerEvent(
+      this.app.vault.on("rename", (file) => {
+        if (!(file instanceof TFile)) return;
+        if (file.extension !== "engsheet" && file.extension !== "csv" && file.extension !== "md") return;
+        this.engTableRenderer.scheduleRerender();
+        this.engPlotRenderer.scheduleRerender();
       })
     );
 
@@ -241,6 +306,19 @@ export default class EngineerPlugin extends Plugin {
       },
     });
 
+    this.addCommand({
+      id: "validate-units",
+      name: "Validate units and dimensions",
+      callback: async () => {
+        const issues = await this.unitEngine.validateVault();
+        const lines = issues.length === 0
+          ? ["No unit or dimensional issues detected."]
+          : issues.map((i) => `- [${i.severity.toUpperCase()}] ${i.file} :: ${i.context} — ${i.message}`);
+        await this.writeReportNote("Engineer Unit Validation Report.md", this.wrapReport("Unit Validation Report", lines));
+        new Notice(issues.length === 0 ? "No unit issues found." : `Unit validation found ${issues.length} issue(s).`);
+      },
+    });
+
     this.addSettingTab(new EngineerSettingsTab(this.app, this));
 
     if (this.settings.parseOnStartup) {
@@ -270,6 +348,26 @@ export default class EngineerPlugin extends Plugin {
 
   async saveSettings(): Promise<void> {
     await this.saveData(this.settings);
+  }
+
+  private wrapReport(title: string, lines: string[]): string {
+    return [
+      `# ${title}`,
+      "",
+      `Generated: ${new Date().toISOString()}`,
+      "",
+      ...lines,
+      "",
+    ].join("\n");
+  }
+
+  private async writeReportNote(path: string, content: string): Promise<void> {
+    const existing = this.app.vault.getAbstractFileByPath(path);
+    if (existing instanceof TFile) {
+      await this.app.vault.modify(existing, content);
+      return;
+    }
+    await this.app.vault.create(path, content);
   }
 
   async parseAllFiles(): Promise<void> {
@@ -305,6 +403,7 @@ export default class EngineerPlugin extends Plugin {
     const leaves = this.app.workspace.getLeavesOfType(VARIABLE_PANEL_VIEW_TYPE);
     if (leaves.length > 0) this.app.workspace.revealLeaf(leaves[0]);
   }
+
 }
 
 class EngineerSettingsTab extends PluginSettingTab {
@@ -387,6 +486,34 @@ class EngineerSettingsTab extends PluginSettingTab {
           this.plugin.settings.pythonShowExportTable = value;
           await this.plugin.saveSettings();
           this.plugin.pythonEngine.showExportTable = value;
+        }));
+
+    containerEl.createEl("h3", { text: "EngTable / EngPlot" });
+
+    new Setting(containerEl)
+      .setName("Show engtable source caption")
+      .setDesc("Display the source path and selected range above engtable renders.")
+      .addToggle(toggle => toggle
+        .setValue(this.plugin.settings.engTableShowSourceCaption)
+        .onChange(async value => {
+          this.plugin.settings.engTableShowSourceCaption = value;
+          await this.plugin.saveSettings();
+          this.plugin.engTableRenderer.rerenderAll();
+        }));
+
+    containerEl.createEl("h3", { text: "Variable dependency graph" });
+
+    new Setting(containerEl)
+      .setName("Enable variable dependency graph")
+      .setDesc("Show graph controls in Variable Store and allow dependency graph rendering.")
+      .addToggle(toggle => toggle
+        .setValue(this.plugin.settings.enableVariableReferenceGraph)
+        .onChange(async value => {
+          this.plugin.settings.enableVariableReferenceGraph = value;
+          await this.plugin.saveSettings();
+          for (const leaf of this.app.workspace.getLeavesOfType(VARIABLE_PANEL_VIEW_TYPE)) {
+            (leaf.view as VariablePanel).refresh();
+          }
         }));
 
     containerEl.createEl("h3", { text: "Variable Panel sections" });

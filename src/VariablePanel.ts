@@ -5,8 +5,13 @@ import {
   TFile,
   MarkdownView,
   FileView,
+  Notice,
 } from "obsidian";
 import { VariableStore, VariableEntry, VariableVisibility } from "./VariableStore";
+import {
+  VariableReferenceGraph,
+  renderVariableReferenceGraph,
+} from "./VariableReferenceGraphView";
 
 export const VARIABLE_PANEL_VIEW_TYPE = "engineer-variable-panel";
 
@@ -28,12 +33,21 @@ export class VariablePanel extends ItemView {
   private storeListener: (key: string, entry: VariableEntry | null) => void;
   private tagResolver?: TagResolver;
   private getConfig: () => PanelConfig;
+  private isGraphEnabled: () => boolean;
+  private activeNoteEntries: Array<{ key: string; entry: VariableEntry }> = [];
+  private graphVisible = false;
+  private graphSourcePath: string | null = null;
+  private activeGraph: VariableReferenceGraph | null = null;
+  private graphCleanup: (() => void) | null = null;
+  private splitterCleanup: (() => void) | null = null;
+  private splitRatio = 0.5;
 
   constructor(
     leaf: WorkspaceLeaf,
     store: VariableStore,
     tagResolver?: TagResolver,
-    getConfig?: () => PanelConfig
+    getConfig?: () => PanelConfig,
+    isGraphEnabled?: () => boolean
   ) {
     super(leaf);
     this.store = store;
@@ -46,6 +60,7 @@ export class VariablePanel extends ItemView {
       showTagSection: true,
       showGlobalSection: true,
     }));
+    this.isGraphEnabled = isGraphEnabled ?? (() => true);
     this.storeListener = () => this.render();
     this.store.on("change", this.storeListener);
   }
@@ -58,20 +73,26 @@ export class VariablePanel extends ItemView {
     this.registerEvent(
       this.app.workspace.on("active-leaf-change", () => {
         const view = this.app.workspace.getActiveViewOfType(FileView);
-        const path = view?.file?.path ?? null;
-        if (path !== this.activeFilePath) {
-          this.activeFilePath = path;
-          this.render();
-        }
+        const path = view?.file?.path;
+        // Keep last valid note selection when non-file leaves (like this panel)
+        // become active. Context only changes when the user selects another file.
+        if (!path) return;
+        if (path === this.activeFilePath) return;
+        this.activeFilePath = path;
+        this.render();
       })
     );
-    const view = this.app.workspace.getActiveViewOfType(FileView);
-    this.activeFilePath = view?.file?.path ?? null;
+    // Prefer workspace active file to preserve note context when opening panel.
+    this.activeFilePath = this.app.workspace.getActiveFile()?.path ?? this.activeFilePath ?? null;
     this.render();
   }
 
   async onClose(): Promise<void> {
     this.store.off("change", this.storeListener);
+    this.graphCleanup?.();
+    this.graphCleanup = null;
+    this.splitterCleanup?.();
+    this.splitterCleanup = null;
   }
 
   /** Called externally (e.g. from settings tab) to force a re-render. */
@@ -81,12 +102,25 @@ export class VariablePanel extends ItemView {
 
   private render(): void {
     const container = this.containerEl.children[1] as HTMLElement;
+    this.graphCleanup?.();
+    this.graphCleanup = null;
+    this.splitterCleanup?.();
+    this.splitterCleanup = null;
     container.empty();
     container.addClass("eng-variable-panel");
+    if (!this.isGraphEnabled()) {
+      this.graphVisible = false;
+      this.activeGraph = null;
+      this.graphSourcePath = null;
+    }
 
     this.renderHeader(container);
     this.renderContextBanner(container);
     this.renderSearch(container);
+    const main = container.createDiv({ cls: "eng-panel-main" });
+    const listPane = main.createDiv({
+      cls: `eng-panel-list${this.graphVisible && this.activeGraph ? " eng-panel-list-split" : ""}`,
+    });
 
     const cfg = this.getConfig();
     const activePath = this.activeFilePath ?? undefined;
@@ -113,6 +147,7 @@ export class VariablePanel extends ItemView {
     const activeNoteEntries = activePath
       ? all.filter(({ entry }) => entry.source === activePath && this.fileExists(entry.source))
       : [];
+    this.activeNoteEntries = activeNoteEntries;
 
     // Local: visibility=file AND source is the active file
     const localEntries = visible.filter(({ entry }) =>
@@ -154,40 +189,47 @@ export class VariablePanel extends ItemView {
 
     const totalVisible = visible.length;
     if (totalVisible === 0 && orphaned.length === 0 && overrides.length === 0) {
-      container.createDiv({
+      listPane.createDiv({
         cls: "eng-empty-state",
         text: all.length === 0
           ? "No variables defined yet.\nAdd a ---vars block to any note."
           : "No variables visible from the active note.",
       });
+      if (this.graphVisible && this.activeGraph) {
+        this.renderEmbeddedGraph(main, listPane, this.activeGraph);
+      }
       this.renderFooter(container, visible);
       return;
     }
 
     if (applySearch(orphaned).length > 0) {
-      this.renderSection(container, "⚠ Orphaned", applySearch(orphaned), "eng-section-orphan", true);
+      this.renderSection(listPane, "⚠ Orphaned", applySearch(orphaned), "eng-section-orphan", true);
     }
     if (applySearch(overrides).length > 0) {
-      this.renderSection(container, "✏ User overrides", applySearch(overrides), "eng-section-override", true);
+      this.renderSection(listPane, "✏ User overrides", applySearch(overrides), "eng-section-override", true);
     }
     if (cfg.showActiveNoteSection && applySearch(activeNoteEntries).length > 0) {
-      this.renderSection(container, "📝 Active Note", applySearch(activeNoteEntries), "eng-section-active-note", false);
+      this.renderSection(listPane, "📝 Active Note", applySearch(activeNoteEntries), "eng-section-active-note", false);
     }
     if (cfg.showLocalSection && applySearch(localEntries).length > 0) {
-      this.renderSection(container, "📄 File", applySearch(localEntries), "eng-section-file", false);
+      this.renderSection(listPane, "📄 File", applySearch(localEntries), "eng-section-file", false);
     }
     if (cfg.showFolderSection && applySearch(folderEntries).length > 0) {
       const folderName = activeFolder ? (activeFolder.split("/").pop() ?? activeFolder) : "Folder";
-      this.renderSection(container, `📁 Folder · ${folderName}`, applySearch(folderEntries), "eng-section-folder", false);
+      this.renderSection(listPane, `📁 Folder · ${folderName}`, applySearch(folderEntries), "eng-section-folder", false);
     }
     if (cfg.showParentFolderSection && applySearch(parentFolderEntries).length > 0) {
-      this.renderSectionByFolder(container, applySearch(parentFolderEntries));
+      this.renderSectionByFolder(listPane, applySearch(parentFolderEntries));
     }
     if (cfg.showTagSection && applySearch(tagEntries).length > 0) {
-      this.renderSectionByTag(container, applySearch(tagEntries));
+      this.renderSectionByTag(listPane, applySearch(tagEntries));
     }
     if (cfg.showGlobalSection && applySearch(globalEntries).length > 0) {
-      this.renderSectionByFile(container, "🌐 Global", applySearch(globalEntries), "eng-section-global");
+      this.renderSectionByFile(listPane, "🌐 Global", applySearch(globalEntries), "eng-section-global");
+    }
+
+    if (this.graphVisible && this.activeGraph) {
+      this.renderEmbeddedGraph(main, listPane, this.activeGraph);
     }
 
     this.renderFooter(container, visible);
@@ -353,6 +395,26 @@ export class VariablePanel extends ItemView {
       const folderSpan = banner.createSpan({ cls: "eng-context-chip eng-context-folder" });
       folderSpan.createSpan({ text: "📁 " });
       folderSpan.createSpan({ text: folder, cls: "eng-context-name" });
+
+      const clearBtn = banner.createEl("button", {
+        cls: "eng-icon-btn",
+        attr: { title: "Clear active note context" },
+      });
+      setIcon(clearBtn, "x");
+      clearBtn.style.marginLeft = "auto";
+      clearBtn.onclick = (e) => {
+        e.stopPropagation();
+        this.activeFilePath = null;
+        this.render();
+      };
+
+      // Clicking empty space in the banner clears context.
+      banner.onclick = (e) => {
+        if (e.target === banner) {
+          this.activeFilePath = null;
+          this.render();
+        }
+      };
     } else {
       banner.createSpan({ cls: "eng-context-none", text: "No active note" });
     }
@@ -380,6 +442,21 @@ export class VariablePanel extends ItemView {
     });
     setIcon(addBtn, "plus-circle");
     addBtn.onclick = () => this.showAddDialog(container);
+
+    if (this.isGraphEnabled()) {
+      const graphBtn = controls.createEl("button", {
+        cls: "eng-icon-btn",
+        attr: { title: this.graphVisible ? "Close reference dependency graph" : "Show reference dependency graph" }
+      });
+      setIcon(graphBtn, "git-branch");
+      if (this.graphVisible) graphBtn.addClass("is-active");
+      graphBtn.onclick = () => {
+        this.toggleReferenceGraph().catch((e) => {
+          console.error("[Engineer] Failed to build variable reference graph:", e);
+          new Notice("Failed to build reference graph.");
+        });
+      };
+    }
 
   }
 
@@ -530,6 +607,198 @@ export class VariablePanel extends ItemView {
 
     cancelBtn.onclick = () => dialog.remove();
     nameInput.focus();
+  }
+
+  // ─── Reference graph ────────────────────────────────────────────────────────
+
+  private async toggleReferenceGraph(): Promise<void> {
+    if (!this.isGraphEnabled()) {
+      new Notice("Variable dependency graph is disabled in settings.");
+      return;
+    }
+    const sourcePath = this.activeFilePath;
+    if (!sourcePath) {
+      new Notice("No active note selected.");
+      return;
+    }
+    if (this.graphVisible && this.graphSourcePath === sourcePath) {
+      this.graphVisible = false;
+      this.graphSourcePath = null;
+      this.activeGraph = null;
+      this.render();
+      return;
+    }
+
+    const sourceEntries = this.getSourceEntries(sourcePath);
+    const variableNames = [...new Set(sourceEntries.map((v) => v.key))];
+    if (variableNames.length === 0) {
+      new Notice("No active-note variables to graph.");
+      return;
+    }
+    this.graphSourcePath = sourcePath;
+    const graph = await this.buildReferenceGraph(sourcePath, variableNames, sourceEntries);
+    if (this.graphSourcePath !== sourcePath) return;
+    this.activeGraph = graph;
+    this.graphVisible = true;
+    this.render();
+  }
+
+  private getSourceEntries(sourcePath: string): Array<{ key: string; entry: VariableEntry }> {
+    return this.store
+      .getAllEntries()
+      .filter(({ entry }) => entry.source === sourcePath && this.fileExists(entry.source));
+  }
+
+  private renderEmbeddedGraph(container: HTMLElement, listPane: HTMLElement, graph: VariableReferenceGraph): void {
+    const splitter = container.createDiv({ cls: "eng-panel-splitter" });
+    const pane = container.createDiv({ cls: "eng-panel-graph-pane" });
+    this.applySplitRatio(listPane, pane);
+    this.splitterCleanup = this.attachSplitter(container, splitter, listPane, pane);
+
+    const header = pane.createDiv({ cls: "eng-ref-graph-view-header" });
+    const sourceName = graph.sourcePath.split("/").pop() ?? graph.sourcePath;
+    header.createSpan({ text: `Dependency graph: ${sourceName}`, cls: "eng-ref-graph-view-title" });
+    const subtitle = header.createSpan({ cls: "eng-ref-graph-view-subtitle" });
+    subtitle.textContent = graph.sourcePath;
+    const stage = pane.createDiv({ cls: "eng-ref-graph-stage" });
+    this.graphCleanup = renderVariableReferenceGraph({
+      app: this.app,
+      stageEl: stage,
+      graph,
+      interactionMultiplier: 2,
+    });
+  }
+
+  private applySplitRatio(listPane: HTMLElement, graphPane: HTMLElement): void {
+    const ratio = Math.max(0.2, Math.min(0.8, this.splitRatio));
+    this.splitRatio = ratio;
+    listPane.style.flexBasis = `${ratio * 100}%`;
+    graphPane.style.flexBasis = `${(1 - ratio) * 100}%`;
+  }
+
+  private attachSplitter(
+    mainPane: HTMLElement,
+    splitter: HTMLElement,
+    listPane: HTMLElement,
+    graphPane: HTMLElement
+  ): () => void {
+    let dragging = false;
+    let pointerId: number | null = null;
+
+    const onPointerDown = (e: PointerEvent) => {
+      dragging = true;
+      pointerId = e.pointerId;
+      splitter.setPointerCapture(e.pointerId);
+      splitter.classList.add("is-dragging");
+      e.preventDefault();
+    };
+
+    const onPointerMove = (e: PointerEvent) => {
+      if (!dragging || pointerId !== e.pointerId) return;
+      const rect = mainPane.getBoundingClientRect();
+      if (rect.height <= 1) return;
+      const y = e.clientY - rect.top;
+      this.splitRatio = y / rect.height;
+      this.applySplitRatio(listPane, graphPane);
+    };
+
+    const onPointerUp = (e: PointerEvent) => {
+      if (!dragging || pointerId !== e.pointerId) return;
+      dragging = false;
+      pointerId = null;
+      splitter.classList.remove("is-dragging");
+      splitter.releasePointerCapture(e.pointerId);
+    };
+
+    splitter.addEventListener("pointerdown", onPointerDown);
+    splitter.addEventListener("pointermove", onPointerMove);
+    splitter.addEventListener("pointerup", onPointerUp);
+    splitter.addEventListener("pointercancel", onPointerUp);
+
+    return () => {
+      splitter.removeEventListener("pointerdown", onPointerDown);
+      splitter.removeEventListener("pointermove", onPointerMove);
+      splitter.removeEventListener("pointerup", onPointerUp);
+      splitter.removeEventListener("pointercancel", onPointerUp);
+    };
+  }
+
+  private async buildReferenceGraph(
+    sourcePath: string,
+    variableNames: string[],
+    sourceEntries: Array<{ key: string; entry: VariableEntry }>
+  ): Promise<VariableReferenceGraph> {
+    const references = new Map<string, Map<string, number>>();
+    const variableScopes: Record<string, string> = {};
+    for (const name of variableNames) references.set(name, new Map<string, number>());
+    for (const { key, entry } of sourceEntries) {
+      if (!variableScopes[key]) variableScopes[key] = entry.visibility;
+    }
+
+    const mdFiles = this.app.vault.getMarkdownFiles();
+    for (const file of mdFiles) {
+      const content = await this.app.vault.read(file);
+      for (const name of variableNames) {
+        const count = this.countMarkdownRefs(content, name);
+        if (count > 0) references.get(name)!.set(file.path, count);
+      }
+    }
+
+    const engFiles = this.app.vault.getFiles().filter((f) => f.extension === "engsheet");
+    for (const file of engFiles) {
+      const content = await this.app.vault.read(file);
+      for (const name of variableNames) {
+        const count = this.countEngSheetRefs(content, name);
+        if (count > 0) {
+          const curr = references.get(name)!.get(file.path) ?? 0;
+          references.get(name)!.set(file.path, curr + count);
+        }
+      }
+    }
+
+    return { sourcePath, variables: variableNames, references, variableScopes };
+  }
+
+  private countMarkdownRefs(content: string, varName: string): number {
+    let count = 0;
+    const subst = /<<([^<>]+)>>/g;
+    for (const m of content.matchAll(subst)) {
+      const inner = m[1];
+      if (this.containsSymbol(inner, varName)) count++;
+    }
+    return count;
+  }
+
+  private countEngSheetRefs(content: string, varName: string): number {
+    const escaped = this.escapeRegex(varName);
+    const storePattern = new RegExp(`STORE\\s*\\(\\s*["']${escaped}["']\\s*\\)`, "gi");
+    const formulaPattern = new RegExp(`\\b${escaped}\\b`, "g");
+    let count = 0;
+    const storeMatches = content.match(storePattern);
+    if (storeMatches) count += storeMatches.length;
+    try {
+      const json = JSON.parse(content) as { sheets?: Array<{ cells?: Record<string, { f?: string | null }> }> };
+      for (const sheet of json.sheets ?? []) {
+        for (const cell of Object.values(sheet.cells ?? {})) {
+          const f = cell?.f;
+          if (!f) continue;
+          const localMatches = f.match(formulaPattern);
+          if (localMatches) count += localMatches.length;
+        }
+      }
+    } catch {
+      // ignore malformed .engsheet files
+    }
+    return count;
+  }
+
+  private containsSymbol(expr: string, symbol: string): boolean {
+    const re = new RegExp(`\\b${this.escapeRegex(symbol)}\\b`);
+    return re.test(expr);
+  }
+
+  private escapeRegex(input: string): string {
+    return input.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   }
 
   // ─── Footer ────────────────────────────────────────────────────────────────

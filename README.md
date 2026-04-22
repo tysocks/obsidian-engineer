@@ -198,6 +198,19 @@ Open with the **{x}** ribbon icon, or **Ctrl+Shift+P → "Engineer: Open Variabl
 - **✕ button** — removes an override or orphaned entry
 - **↺ Refresh** — re-parses all `---vars` blocks across the vault
 - **+ Add** — defines a temporary variable without editing any file
+- **Git-branch button** — toggle the variable dependency graph for the active note
+
+### Embedded dependency graph
+
+The variable dependency graph now lives inside the Variable Store panel (bottom half), not as a separate ribbon view.
+
+- Click the graph button once to open the graph for the currently active note.
+- Click it again with the same source note active to close the graph.
+- If the active note changed, clicking the button updates the graph source to the new note.
+- Source and referenced file nodes are clickable and open the corresponding file.
+- Variable node colors reflect scope (`global`, `folder`, `tag`, `file`, `block`).
+- Pan/zoom and node dragging are supported.
+- Use the horizontal splitter bar between list and graph to resize the two panes.
 
 ---
 
@@ -393,6 +406,12 @@ File-sourced variables are re-parsed from `---vars` blocks on startup. Ghost ent
 | Run #runOnParse blocks automatically | On | Execute python blocks with `# runOnParse` on startup and file save. |
 | Show "Exported to store" table | On | Show the variable summary table below Python output after a run. |
 
+### Variable dependency graph
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| Enable variable dependency graph | On | Enables graph controls and rendering in the Variable Store panel. |
+
 ### Variable Panel sections
 
 Toggle individual sections in the sidebar on or off: File, Folder, Path, Tag, Global.
@@ -477,6 +496,7 @@ Toggle individual sections in the sidebar on or off: File, Folder, Path, Tag, Gl
 - EngSheet undo/redo for cell edits, paste, autofill, sort, clear, and formatting
 - Math rendering color settings (calculation value and error placeholder)
 - Python "Exported to store" table toggle
+- Variable Store embedded dependency graph with pan/zoom, node dragging, scope color coding, and draggable splitter
 
 ### ✅ Phase 5 — CSV import/export + Google Sheets interop
 
@@ -486,13 +506,13 @@ Toggle individual sections in the sidebar on or off: File, Folder, Path, Tag, Gl
 - TSV copy: Ctrl+C in EngSheet writes TSV to system clipboard → paste directly into Google Sheets or Excel
 - Formula point mode: arrow keys and click-drag insert cell references while typing a formula
 
-### 📋 Phase 6 — Data plotting (planned)
+### ✅ Phase 6 — Data plotting + live linked tables
 
-`engplot` code fences render interactive charts inline in notes. Data is sourced from `.engsheet` column ranges, vault CSV files, or inline arrays declared in the fence. Store variables can be referenced for threshold lines. Charts update live when source data changes.
+`engplot` code fences render inline SVG charts in notes. Data can come from `.engsheet` ranges, vault CSV files, or inline arrays. Reference lines can use store expressions like `<<F_allow>>`. Charts rerender when source `.engsheet`/`.csv` files change.
 
-**Planned chart types:** line, scatter, bar, horizontal bar, area (filled line), pie, donut
+**Supported chart types:** line, scatter, bar, horizontal bar, area (filled line), pie, donut
 
-**Planned data sources:**
+**Supported data sources:**
 
 | Source | Syntax |
 |--------|--------|
@@ -501,7 +521,47 @@ Toggle individual sections in the sidebar on or off: File, Folder, Path, Tag, Gl
 | Inline arrays | `x: [1, 2, 3]`, `y: [10, 20, 15]` |
 | Store variable reference line | `reference: { label: "Allowable", value: "<<F_allow>>" }` |
 
-**Planned fence syntax:**
+Dual-axis support is enabled per-series using `axis: left` or `axis: right`:
+
+````markdown
+```engplot
+type: line
+title: Beam response
+x-label: Time (s)
+y-label: Length (mm)
+y2-label: Speed (m/s)
+series:
+  - name: Length A
+    source: data/run.engsheet
+    sheet: Sheet1
+    x: A2:A200
+    y: B2:B200
+    axis: left
+  - name: Length B
+    source: data/run.engsheet
+    sheet: Sheet1
+    x: A2:A200
+    y: C2:C200
+    axis: left
+  - name: Speed A
+    source: data/run.engsheet
+    sheet: Sheet1
+    x: A2:A200
+    y: D2:D200
+    axis: right
+  - name: Speed B
+    source: data/run.engsheet
+    sheet: Sheet1
+    x: A2:A200
+    y: E2:E200
+    axis: right
+options:
+  legend: true
+  grid: true
+```
+````
+
+**Fence syntax:**
 
 ````markdown
 ```engplot
@@ -522,4 +582,18 @@ options:
 ```
 ````
 
-**Other planned capabilities:** theme-aware colors (inherits Obsidian light/dark mode), right-click PNG export, re-render on vault file change.
+`engtable` code fences render a linked table from a selected `.engsheet` (or CSV) range and rerender when source data changes:
+
+````markdown
+```engtable
+source: data/beam_results.engsheet
+sheet: Sheet1
+range: A2:D20
+header: false
+show-source: true
+```
+````
+
+In EngSheet, use right-click **Copy engtable reference** (or command palette: **Engineer: Copy engtable reference from current selection**) to generate a fence for the current sheet and selected range.
+
+Global setting: **Settings → Engineer → EngTable / EngPlot → Show engtable source caption**.

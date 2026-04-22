@@ -15,6 +15,59 @@
   overflow: hidden;
 }
 
+.eng-panel-main {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.eng-panel-list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.eng-panel-list-split {
+  flex: 0 0 50%;
+}
+
+.eng-panel-graph-pane {
+  flex: 0 0 50%;
+  min-height: 180px;
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+.eng-panel-splitter {
+  flex: 0 0 8px;
+  cursor: row-resize;
+  background: var(--background-primary);
+  border-top: 1px solid var(--background-modifier-border);
+  border-bottom: 1px solid var(--background-modifier-border);
+  position: relative;
+  touch-action: none;
+}
+
+.eng-panel-splitter::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 40px;
+  height: 2px;
+  transform: translate(-50%, -50%);
+  border-radius: 2px;
+  background: var(--background-modifier-border);
+}
+
+.eng-panel-splitter:hover::after,
+.eng-panel-splitter.is-dragging::after {
+  background: var(--interactive-accent);
+}
+
 .eng-panel-header {
   display: flex;
   align-items: center;
@@ -50,6 +103,10 @@
 .eng-icon-btn:hover {
   background: var(--background-modifier-hover);
   color: var(--text-normal);
+}
+
+.eng-icon-btn.is-active {
+  color: var(--interactive-accent);
 }
 
 .eng-spinning {
@@ -1432,4 +1489,242 @@
   outline-offset: -2px;
   background-color: color-mix(in srgb, var(--color-blue, #4a90e2) 15%, var(--background-primary)) !important;
 }
+
+/* ─── Live EngTable / EngPlot ─────────────────────────────────────────────── */
+
+.eng-live-table-wrap {
+  margin: 0.75em 0;
+  overflow-x: auto;
+}
+
+.eng-live-table-caption {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+  font-family: var(--font-monospace);
+}
+
+.eng-live-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 12px;
+  border: 1px solid var(--background-modifier-border);
+}
+
+.eng-live-table th,
+.eng-live-table td {
+  border: 1px solid var(--background-modifier-border);
+  padding: 4px 8px;
+  text-align: left;
+}
+
+.eng-live-table th {
+  background: var(--background-secondary);
+  font-weight: 600;
+}
+
+.eng-live-table-error,
+.eng-plot-error {
+  margin: 6px 0;
+  padding: 6px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  background: var(--background-modifier-error);
+  color: var(--text-error);
+}
+
+.eng-plot-wrap {
+  margin: 0.75em 0;
+}
+
+.eng-plot-title {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.eng-plot-svg {
+  width: 100%;
+  height: auto;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background: var(--background-primary);
+}
+
+.eng-plot-grid {
+  stroke: var(--background-modifier-border);
+  stroke-width: 1;
+  opacity: 0.8;
+}
+
+.eng-plot-axis {
+  stroke: var(--text-muted);
+  stroke-width: 1.2;
+}
+
+.eng-plot-reference {
+  stroke: #ef4444;
+  stroke-width: 1.5;
+  stroke-dasharray: 5 4;
+}
+
+.eng-plot-label {
+  fill: var(--text-muted);
+  font-size: 11px;
+  text-anchor: middle;
+}
+
+.eng-plot-legend {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+
+.eng-plot-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.eng-plot-legend-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  display: inline-block;
+}
+
+/* ─── Variable reference graph view ───────────────────────────────────────── */
+
+.eng-ref-graph-view {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.eng-ref-graph-empty {
+  margin: auto;
+  color: var(--text-muted);
+  font-size: 12px;
+  text-align: center;
+  padding: 12px;
+}
+
+.eng-ref-graph-view-header {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--background-modifier-border);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: var(--background-secondary);
+}
+
+.eng-ref-graph-view-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-normal);
+}
+
+.eng-ref-graph-view-subtitle {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-family: var(--font-monospace);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.eng-ref-graph-stage {
+  flex: 1;
+  min-height: 240px;
+  border-top: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  overflow: hidden;
+}
+
+.eng-panel-graph-pane .eng-ref-graph-stage {
+  min-height: 0;
+  border-top: none;
+}
+
+.eng-ref-graph-svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.eng-ref-edge {
+  stroke: var(--text-muted);
+  stroke-opacity: 0.45;
+  stroke-width: 1.4;
+}
+
+.eng-ref-edge-ref {
+  stroke: var(--interactive-accent);
+  stroke-opacity: 0.55;
+}
+
+.eng-ref-edge-self {
+  stroke: #f59e0b;
+  stroke-opacity: 0.7;
+  stroke-dasharray: 4 3;
+  fill: none;
+}
+
+.eng-ref-node rect {
+  stroke: var(--background-modifier-border);
+  stroke-width: 1;
+}
+
+.eng-ref-node text {
+  fill: var(--text-normal);
+  font-size: 11px;
+  user-select: none;
+}
+
+.eng-ref-node-source rect {
+  fill: color-mix(in srgb, var(--interactive-accent) 16%, var(--background-primary));
+}
+
+.eng-ref-node-var rect {
+  fill: color-mix(in srgb, var(--color-blue, #4a90e2) 12%, var(--background-primary));
+}
+
+.eng-ref-node-var-global rect {
+  fill: color-mix(in srgb, var(--color-blue, #4a90e2) 18%, var(--background-primary));
+}
+
+.eng-ref-node-var-folder rect {
+  fill: color-mix(in srgb, var(--color-green, #22c55e) 18%, var(--background-primary));
+}
+
+.eng-ref-node-var-tag rect {
+  fill: color-mix(in srgb, var(--color-purple, #8b5cf6) 20%, var(--background-primary));
+}
+
+.eng-ref-node-var-file rect {
+  fill: color-mix(in srgb, var(--color-orange, #f59e0b) 22%, var(--background-primary));
+}
+
+.eng-ref-node-var-block rect {
+  fill: color-mix(in srgb, var(--color-red, #ef4444) 18%, var(--background-primary));
+}
+
+.eng-ref-node-file rect {
+  fill: color-mix(in srgb, var(--background-secondary) 70%, var(--background-primary));
+}
+
+.eng-ref-node-file:hover rect {
+  stroke: var(--interactive-accent);
+  stroke-width: 1.4;
+}
+
+.eng-ref-node-source:hover rect {
+  stroke: var(--interactive-accent);
+  stroke-width: 1.4;
+}
+
+.eng-ref-graph-legend { display: none; }
 

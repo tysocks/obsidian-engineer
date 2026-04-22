@@ -151,11 +151,11 @@ export class MathEngine {
     let source = "";
     const info = ctx.getSectionInfo(el);
     if (info?.text) {
-      // getSectionInfo succeeded — use only this section's lines.
-      // If those lines contain no <<, this section has no substitutions: skip.
-      // Do NOT fall back to full-file source; that would contaminate this section
-      // with << patterns from other sections and render them in the wrong block.
-      source = info.text.split("\n").slice(info.lineStart, info.lineEnd + 1).join("\n");
+      // getSectionInfo already provides this section's raw markdown text.
+      // If it has no << substitutions, skip this section.
+      // Do NOT fall back to full-file source in this branch; that would
+      // contaminate this section with patterns from elsewhere in the file.
+      source = info.text;
       if (!source.includes("<<")) return;
     } else {
       // getSectionInfo gave nothing — fall back to full file cache.
