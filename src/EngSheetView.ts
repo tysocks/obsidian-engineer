@@ -196,6 +196,11 @@ export class EngSheetView extends FileView {
   private redoStack: UndoEntry[] = [];
   private _batchEntry: UndoEntry | null = null;
 
+  // Formula point mode — active while user types a formula and navigates cells
+  private _formulaEditInput: HTMLInputElement | null = null;
+  private _formulaPoint: { r0: number; c0: number; r1: number; c1: number } | null = null;
+  private _formulaRefSpan: { start: number; end: number } | null = null;
+
   // Cached cell DOM references
   private cellEls: HTMLTableCellElement[][] = [];
 
@@ -756,6 +761,13 @@ export class EngSheetView extends FileView {
 
         td.onmousedown = (ev: MouseEvent) => {
           if (ev.button !== 0) return;
+          // Formula point mode: clicking (or drag-selecting) a cell inserts its address
+          if (this._formulaEditInput && this._formulaEditInput.value.startsWith("=")) {
+            ev.preventDefault();
+            ev.stopPropagation();
+            this.startFormulaRefDrag(r, c);
+            return;
+          }
           ev.preventDefault();
           if (ev.shiftKey) this.extendSelection(r, c);
           else { this.setSelection(r, c, r, c); this.startMouseSelect(r, c); }
@@ -785,12 +797,11 @@ export class EngSheetView extends FileView {
       }
     });
 
-    // TSV paste from external sources (Google Sheets, Excel).
-    // Fires on Ctrl+V when no internal clipboard is set; internal clipboard
-    // is handled by handleKey → pasteClipboard() and takes priority.
+    // TSV paste fallback — handles drag-and-drop paste or browser-initiated paste events.
+    // Ctrl+V is handled directly in handleKey via navigator.clipboard.readText().
     this.tableEl.addEventListener("paste", (e: ClipboardEvent) => {
       if (this.editingCell) return;
-      if (this.clipboard) return; // internal cut/copy takes priority
+      if (this.clipboard) return;
       e.preventDefault();
       const text = e.clipboardData?.getData("text/plain") ?? "";
       if (!text) return;
@@ -1164,7 +1175,17 @@ export class EngSheetView extends FileView {
     if (initialChar === null) input.select(); else input.setSelectionRange(1,1);
 
     this.formulaInput.value = input.value;
-    input.oninput = () => { this.formulaInput.value = input.value; };
+    this._formulaEditInput = input;
+
+    input.oninput = () => {
+      // Any typed character exits formula point mode
+      if (this._formulaPoint) {
+        this._formulaPoint = null;
+        this._formulaRefSpan = null;
+        this.clearFormulaPointHighlight();
+      }
+      this.formulaInput.value = input.value;
+    };
 
     // Restore cell to a clean state before refreshCell runs — otherwise the
     // <input> element remains in the <td> after commit, appearing as a box over the value.
@@ -1172,6 +1193,13 @@ export class EngSheetView extends FileView {
       td.empty();
       td.style.padding  = origPad;
       td.style.overflow = "hidden";
+    };
+
+    const exitFormulaPoint = () => {
+      this._formulaEditInput = null;
+      this._formulaPoint = null;
+      this._formulaRefSpan = null;
+      this.clearFormulaPointHighlight();
     };
 
     // Guards against double-commit: onblur can fire after Enter/Tab already called commit
@@ -1182,6 +1210,7 @@ export class EngSheetView extends FileView {
       committed = true;
       const val = input.value;
       this.editingCell = null;
+      exitFormulaPoint();
       restoreCell();
       this.setCellRaw(r, c, val);
       this.setSelection(newR, newC, newR, newC);
@@ -1191,26 +1220,167 @@ export class EngSheetView extends FileView {
     const cancel = () => {
       committed = true;
       this.editingCell = null;
+      exitFormulaPoint();
       td.innerHTML      = origContent;
       td.style.padding  = origPad;
       td.style.overflow = "hidden";
+      // origContent may have re-inserted a fill-handle element from HTML without its
+      // event listeners. Re-run updateFillHandle to replace it with a wired one.
+      this.updateFillHandle();
       this.tableEl.focus();
     };
 
     input.onkeydown = (e) => {
-      if (e.key==="Enter")  { e.preventDefault(); e.stopPropagation(); commit(r+1,c); }
-      if (e.key==="Tab")    { e.preventDefault(); e.stopPropagation(); commit(r,c+(e.shiftKey?-1:1)); }
-      if (e.key==="Escape") { e.preventDefault(); e.stopPropagation(); cancel(); }
-    };
-    input.onblur = () => {
-      if (committed) return;
-      if (this.editingCell?.r===r && this.editingCell?.c===c) {
-        committed = true;
-        this.editingCell = null;
-        restoreCell();
-        this.setCellRaw(r, c, input.value);
+      if (e.key==="Enter")  { e.preventDefault(); e.stopPropagation(); commit(r+1,c); return; }
+      if (e.key==="Tab")    { e.preventDefault(); e.stopPropagation(); commit(r,c+(e.shiftKey?-1:1)); return; }
+      if (e.key==="Escape") { e.preventDefault(); e.stopPropagation(); cancel(); return; }
+      // Formula point mode: arrow keys navigate cells and insert cell references
+      if (["ArrowUp","ArrowDown","ArrowLeft","ArrowRight"].includes(e.key) && input.value.startsWith("=")) {
+        const pos = input.selectionStart ?? input.value.length;
+        const before = input.value.slice(0, pos);
+        const inRefContext = /[(,=+\-*/^&:\s]$/.test(before) || this._formulaPoint !== null;
+        if (inRefContext) {
+          e.preventDefault();
+          e.stopPropagation();
+          this.handleFormulaArrow(e.key, e.shiftKey, input);
+          return;
+        }
       }
     };
+    // Fix: removed the extra editingCell check — setSelection() clears editingCell before
+    // blur fires, so the old check prevented commit when clicking away from the cell.
+    input.onblur = () => {
+      if (committed) return;
+      committed = true;
+      this.editingCell = null;
+      exitFormulaPoint();
+      restoreCell();
+      this.setCellRaw(r, c, input.value);
+    };
+  }
+
+  // ─── Formula point mode (arrow / click to insert cell refs during formula entry) ─
+
+  private handleFormulaArrow(key: string, shift: boolean, input: HTMLInputElement): void {
+    const sheet = this.currentSheet();
+    if (!this._formulaPoint) {
+      // Enter point mode: initialize reference at the active cell
+      const pos = input.selectionStart ?? input.value.length;
+      const addr = cellAddr(this.sel.r1, this.sel.c1);
+      const before = input.value.slice(0, pos);
+      const after  = input.value.slice(pos);
+      input.value = before + addr + after;
+      this._formulaRefSpan = { start: pos, end: pos + addr.length };
+      this._formulaPoint   = { r0: this.sel.r1, c0: this.sel.c1, r1: this.sel.r1, c1: this.sel.c1 };
+      input.setSelectionRange(this._formulaRefSpan.end, this._formulaRefSpan.end);
+      this.formulaInput.value = input.value;
+      this.highlightFormulaPoint();
+      return;
+    }
+
+    const { r0, c0, r1, c1 } = this._formulaPoint;
+    let nr1 = r1, nc1 = c1;
+    if (key === "ArrowUp")    nr1 = Math.max(0, r1 - 1);
+    if (key === "ArrowDown")  nr1 = Math.min(sheet.numRows - 1, r1 + 1);
+    if (key === "ArrowLeft")  nc1 = Math.max(0, c1 - 1);
+    if (key === "ArrowRight") nc1 = Math.min(sheet.numCols - 1, c1 + 1);
+
+    if (shift) {
+      this._formulaPoint = { r0, c0, r1: nr1, c1: nc1 };
+    } else {
+      this._formulaPoint = { r0: nr1, c0: nc1, r1: nr1, c1: nc1 };
+    }
+
+    const { r0: pr0, c0: pc0, r1: pr1, c1: pc1 } = this._formulaPoint;
+    const addr = (pr0 !== pr1 || pc0 !== pc1)
+      ? `${cellAddr(Math.min(pr0,pr1), Math.min(pc0,pc1))}:${cellAddr(Math.max(pr0,pr1), Math.max(pc0,pc1))}`
+      : cellAddr(pr0, pc0);
+
+    if (this._formulaRefSpan) {
+      const { start } = this._formulaRefSpan;
+      input.value = input.value.slice(0, start) + addr + input.value.slice(this._formulaRefSpan.end);
+      this._formulaRefSpan = { start, end: start + addr.length };
+      input.setSelectionRange(this._formulaRefSpan.end, this._formulaRefSpan.end);
+    }
+    this.formulaInput.value = input.value;
+    this.highlightFormulaPoint();
+    // Scroll the referenced cell into view
+    this.cellEls[pr1]?.[pc1]?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }
+
+  private startFormulaRefDrag(startR: number, startC: number): void {
+    // Insert the initial single-cell reference, then track drag to extend to a range.
+    this.insertFormulaRefClick(startR, startC);
+
+    const onMove = (e: MouseEvent) => {
+      const el = document.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null;
+      const tdEl = el?.closest?.("td") as HTMLTableCellElement | null;
+      if (!tdEl || tdEl.closest("table") !== this.tableEl) return;
+      const tr = tdEl.closest("tr") as HTMLTableRowElement;
+      const allRows = [...this.tbodyEl.querySelectorAll("tr")] as HTMLTableRowElement[];
+      const r = allRows.indexOf(tr);
+      const c = [...tr.querySelectorAll("td")].indexOf(tdEl) - 1;
+      if (r < 0 || c < 0 || !this._formulaPoint || !this._formulaRefSpan) return;
+
+      this._formulaPoint = { r0: startR, c0: startC, r1: r, c1: c };
+      const { r0, c0, r1, c1 } = this._formulaPoint;
+      const addr = (r0 !== r1 || c0 !== c1)
+        ? `${cellAddr(Math.min(r0,r1), Math.min(c0,c1))}:${cellAddr(Math.max(r0,r1), Math.max(c0,c1))}`
+        : cellAddr(r0, c0);
+      const input = this._formulaEditInput!;
+      const { start } = this._formulaRefSpan;
+      input.value = input.value.slice(0, start) + addr + input.value.slice(this._formulaRefSpan.end);
+      this._formulaRefSpan = { start, end: start + addr.length };
+      input.setSelectionRange(this._formulaRefSpan.end, this._formulaRefSpan.end);
+      this.formulaInput.value = input.value;
+      this.highlightFormulaPoint();
+    };
+
+    const onUp = () => {
+      document.removeEventListener("mousemove", onMove);
+      document.removeEventListener("mouseup", onUp);
+      this._formulaEditInput?.focus();
+    };
+
+    document.addEventListener("mousemove", onMove);
+    document.addEventListener("mouseup", onUp);
+  }
+
+  private insertFormulaRefClick(r: number, c: number): void {
+    const input = this._formulaEditInput;
+    if (!input) return;
+    const addr = cellAddr(r, c);
+    if (this._formulaRefSpan) {
+      const { start } = this._formulaRefSpan;
+      input.value = input.value.slice(0, start) + addr + input.value.slice(this._formulaRefSpan.end);
+      this._formulaRefSpan = { start, end: start + addr.length };
+      input.setSelectionRange(this._formulaRefSpan.end, this._formulaRefSpan.end);
+    } else {
+      const pos = input.selectionStart ?? input.value.length;
+      const before = input.value.slice(0, pos);
+      const after  = input.value.slice(pos);
+      input.value = before + addr + after;
+      this._formulaRefSpan = { start: pos, end: pos + addr.length };
+      input.setSelectionRange(this._formulaRefSpan.end, this._formulaRefSpan.end);
+    }
+    this._formulaPoint = { r0: r, c0: c, r1: r, c1: c };
+    this.formulaInput.value = input.value;
+    this.highlightFormulaPoint();
+    input.focus();
+  }
+
+  private highlightFormulaPoint(): void {
+    this.clearFormulaPointHighlight();
+    if (!this._formulaPoint) return;
+    const { r0, c0, r1, c1 } = this._formulaPoint;
+    for (let rr = Math.min(r0,r1); rr <= Math.max(r0,r1); rr++)
+      for (let cc = Math.min(c0,c1); cc <= Math.max(c0,c1); cc++)
+        this.cellEls[rr]?.[cc]?.classList.add("eng-formula-ref");
+  }
+
+  private clearFormulaPointHighlight(): void {
+    this.containerEl.querySelectorAll(".eng-formula-ref")
+      .forEach(el => el.classList.remove("eng-formula-ref"));
   }
 
   private setCellRaw(r: number, c: number, raw: string): void {
@@ -1253,7 +1423,21 @@ export class EngSheetView extends FileView {
       switch(e.key.toLowerCase()) {
         case "c": e.preventDefault(); this.copySelectionFull(); return;
         case "x": e.preventDefault(); this.cutSelection(); return;
-        case "v": e.preventDefault(); this.pasteClipboard(); return;
+        case "v":
+          e.preventDefault();
+          if (this.clipboard) {
+            this.pasteClipboard();
+          } else {
+            // Read system clipboard directly so TSV from Google Sheets / Excel works.
+            // (e.preventDefault() on keydown suppresses the paste event, so we must
+            // read the clipboard explicitly here rather than relying on that event.)
+            navigator.clipboard.readText().then(text => {
+              if (!text) return;
+              const delim = text.includes("\t") ? "\t" : ",";
+              this.pasteExternalData(this.parseDelimited(text, delim as "\t" | ","));
+            }).catch(() => {});
+          }
+          return;
         case "b": e.preventDefault(); this.toggleFormat("bold"); return;
         case "i": e.preventDefault(); this.toggleFormat("italic"); return;
         case "u": e.preventDefault(); this.toggleFormat("underline"); return;
@@ -1745,15 +1929,23 @@ export class EngSheetView extends FileView {
 
   private pasteExternalData(rows: string[][]): void {
     if (rows.length === 0) return;
-    this.startUndoBatch();
     const { r1,c1 } = this.sel;
     const sheet = this.currentSheet();
+
+    // Expand sheet dimensions if the pasted data exceeds them, then rebuild the grid.
+    const neededRows = r1 + rows.length;
+    const neededCols = c1 + Math.max(...rows.map(row => row.length));
+    let needRebuild = false;
+    if (neededRows > sheet.numRows) { sheet.numRows = neededRows; needRebuild = true; }
+    if (neededCols > sheet.numCols) { sheet.numCols = neededCols; needRebuild = true; }
+    if (needRebuild) { this.buildGrid(); this.refreshAllCells(); this.updateSelection(); }
+
+    this.startUndoBatch();
     let hasFormula = false;
 
     for (let dr = 0; dr < rows.length; dr++) {
       for (let dc = 0; dc < rows[dr].length; dc++) {
         const r = r1 + dr, c = c1 + dc;
-        if (r >= sheet.numRows || c >= sheet.numCols) continue;
         const addr = cellAddr(r, c);
         const before = sheet.cells[addr] ? JSON.parse(JSON.stringify(sheet.cells[addr])) as CellData : undefined;
         const raw = rows[dr][dc];

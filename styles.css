@@ -1426,3 +1426,10 @@
   border-color: var(--interactive-accent) !important;
 }
 
+/* Formula point mode — cell being referenced during formula entry */
+.eng-cell.eng-formula-ref {
+  outline: 2px solid var(--color-blue, #4a90e2) !important;
+  outline-offset: -2px;
+  background-color: color-mix(in srgb, var(--color-blue, #4a90e2) 15%, var(--background-primary)) !important;
+}
+

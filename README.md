@@ -212,7 +212,7 @@ Full Excel-like spreadsheet files with a dedicated editor. Create one with **Ctr
 | **Name box** | Active cell address. Type an address and press Enter to jump. |
 | **Formula bar** | Raw formula or value of the active cell. |
 | **Home ribbon** | Undo/Redo, Clipboard, Font, Alignment, Borders, Number format, Cells, Clear |
-| **Data ribbon** | Sort A→Z / Z→A |
+| **Data ribbon** | Sort A→Z / Z→A, CSV Import, CSV Export |
 | **View ribbon** | Freeze top row / first column / unfreeze |
 | **Sheet tabs** | Switch, add, rename, delete. Right-click for options. |
 | **Status bar** | Autosave status · selection address · Sum / Count / Avg for numeric ranges |
@@ -233,6 +233,16 @@ Full Excel-like spreadsheet files with a dedicated editor. Create one with **Ctr
 | Ctrl+Y / Ctrl+Shift+Z | Redo |
 | Ctrl+S | Save immediately |
 
+### Formula entry — point mode
+
+While typing a formula that starts with `=`, you can select cell references interactively without leaving the keyboard:
+
+- **Arrow keys** — when the cursor is after `(`, `,`, `=`, or an operator, arrow keys enter point mode: they navigate the grid and insert the cell address at the cursor position. The referenced cell is highlighted in blue.
+- **Shift+Arrow** — extends the reference to a range (e.g. `A1:C4`).
+- **Click a cell** — inserts that cell's address at the cursor. Click and drag to insert a range.
+- **Any letter/digit key** — exits point mode and resumes normal formula typing.
+- **Enter / Tab** — commits the formula as usual.
+
 ### Formula syntax
 
 | Syntax | Description |
@@ -250,6 +260,19 @@ Drag the small square handle at the bottom-right of a selection to fill down or 
 ### Undo / Redo
 
 Up to 50 levels of undo per sheet. Covers cell edits, paste, autofill, sort, clear, and formatting changes. Undo stack resets when switching sheets.
+
+### CSV import
+
+Click **Import** in the Data ribbon to load a `.csv` file into the sheet starting at the active cell. The sheet expands automatically if the CSV has more rows or columns than the current grid. Quoted fields and escaped quotes (RFC 4180) are handled correctly.
+
+### CSV export
+
+Click **Export** in the Data ribbon to download the current sheet (or selected range, if more than one cell is selected) as a `.csv` file. Resolved cell values are exported — formulas are not written to the file.
+
+### Google Sheets / Excel clipboard interop
+
+- **Paste from Google Sheets or Excel** — copy cells in Google Sheets or Excel, then press Ctrl+V in EngSheet. The tab-separated clipboard content is parsed and populated into the sheet starting at the active cell.
+- **Copy to Google Sheets or Excel** — select a range in EngSheet and press Ctrl+C. The selection is written to the system clipboard as TSV, so it can be pasted directly into Google Sheets or Excel with column alignment intact.
 
 ---
 
@@ -416,6 +439,9 @@ Toggle individual sections in the sidebar on or off: File, Folder, Path, Tag, Gl
 **`.engsheet` formula shows `#NAME?` or `#REF!`**
 → The formula uses an unrecognized function or invalid cell reference. For store access use `=STORE("varname")`.
 
+**Pasting from Google Sheets does nothing**
+→ Ensure the EngSheet grid is focused (click any cell), then press Ctrl+V. If an internal copy is active (marching ants border visible), press Escape first to clear it, then paste.
+
 ---
 
 ## Development status
@@ -452,17 +478,48 @@ Toggle individual sections in the sidebar on or off: File, Folder, Path, Tag, Gl
 - Math rendering color settings (calculation value and error placeholder)
 - Python "Exported to store" table toggle
 
-### 📋 Phase 5 — CSV import/export + Google Sheets interop (planned)
+### ✅ Phase 5 — CSV import/export + Google Sheets interop
 
-- CSV import: file picker → populate EngSheet from a `.csv` file
-- CSV export: serialize selected range or used range to `.csv` download
-- TSV paste: copy cells in Google Sheets → paste directly into EngSheet
-- TSV copy: copy EngSheet selection → paste directly into Google Sheets
+- CSV import: file picker → populate EngSheet from a `.csv` file; sheet auto-expands to fit
+- CSV export: selected range or used range serialized to a `.csv` download
+- TSV paste: copy cells in Google Sheets or Excel → Ctrl+V into EngSheet
+- TSV copy: Ctrl+C in EngSheet writes TSV to system clipboard → paste directly into Google Sheets or Excel
+- Formula point mode: arrow keys and click-drag insert cell references while typing a formula
 
 ### 📋 Phase 6 — Data plotting (planned)
 
-- `engplot` code fence: inline Chart.js charts in notes
-- Data sources: `.engsheet` column ranges, vault CSV files, inline arrays
-- Chart types: line, scatter, bar, area, pie
-- Store variable reference lines
-- Theme-aware colors, live update when source data changes
+`engplot` code fences render interactive charts inline in notes. Data is sourced from `.engsheet` column ranges, vault CSV files, or inline arrays declared in the fence. Store variables can be referenced for threshold lines. Charts update live when source data changes.
+
+**Planned chart types:** line, scatter, bar, horizontal bar, area (filled line), pie, donut
+
+**Planned data sources:**
+
+| Source | Syntax |
+|--------|--------|
+| EngSheet column range | `source: data/results.engsheet`, `sheet: Sheet1`, `x: A2:A50` |
+| Vault CSV file | `source: data/results.csv`, `x: Load`, `y: Deflection` |
+| Inline arrays | `x: [1, 2, 3]`, `y: [10, 20, 15]` |
+| Store variable reference line | `reference: { label: "Allowable", value: "<<F_allow>>" }` |
+
+**Planned fence syntax:**
+
+````markdown
+```engplot
+type: line
+title: Load vs Deflection
+x-label: Load (N)
+y-label: Deflection (mm)
+series:
+  - name: Test A
+    source: data/beam_results.engsheet
+    sheet: Sheet1
+    x: A2:A20
+    y: B2:B20
+options:
+  legend: true
+  grid: true
+  smooth: false
+```
+````
+
+**Other planned capabilities:** theme-aware colors (inherits Obsidian light/dark mode), right-click PNG export, re-render on vault file change.
