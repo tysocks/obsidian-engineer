@@ -27,6 +27,7 @@
  */
 
 import { FileView, Menu, Notice, WorkspaceLeaf, TFile, setIcon } from "obsidian";
+import { HyperFormula } from "hyperformula";
 import { VariableStore, VariableVisibility } from "./VariableStore";
 
 type TagResolver = (filePath: string) => string[];
@@ -298,21 +299,11 @@ export class EngSheetView extends FileView {
   // ─── HyperFormula ────────────────────────────────────────────────────────────
 
   private async loadHyperFormula(): Promise<void> {
-    if ((window as Record<string, unknown>).HyperFormula) return;
-    return new Promise((resolve, reject) => {
-      const s = document.createElement("script");
-      s.src = "https://cdn.jsdelivr.net/npm/hyperformula/dist/hyperformula.full.min.js";
-      s.onload = () => resolve();
-      s.onerror = () => reject(new Error("HyperFormula CDN load failed"));
-      document.head.appendChild(s);
-    });
+    // HyperFormula is bundled locally via npm/esbuild (no runtime CDN fetch).
+    return Promise.resolve();
   }
 
   private rebuildHF(): void {
-    const HF = (window as Record<string, unknown>).HyperFormula as {
-      buildFromArray: (data: unknown[][], opts: unknown) => unknown;
-    } | undefined;
-    if (!HF) return;
     const sheet = this.currentSheet();
     const data: (string | number | boolean | null)[][] =
       Array.from({ length: sheet.numRows }, () => Array(sheet.numCols).fill(null) as (string|number|boolean|null)[]);
@@ -323,7 +314,7 @@ export class EngSheetView extends FileView {
       data[p.row][p.col] = cell.f ? this.resolveCustomFuncs(cell.f) : (cell.v ?? null);
     }
     try {
-      this.hf = HF.buildFromArray(data, { licenseKey: "gpl-v3" });
+      this.hf = HyperFormula.buildFromArray(data, { licenseKey: "gpl-v3" });
     } catch(e) { console.warn("[Engineer] HF error:", e); }
     this.processExports();
   }
@@ -1820,18 +1811,18 @@ export class EngSheetView extends FileView {
   private freezeRows(count: number): void {
     const s = this.currentSheet();
     s.frozen = { rows:count, cols:s.frozen?.cols ?? 0 };
-    this.switchSheet();
+    this.switchSheet(true);
   }
 
   private freezeCols(count: number): void {
     const s = this.currentSheet();
     s.frozen = { rows:s.frozen?.rows ?? 0, cols:count };
-    this.switchSheet();
+    this.switchSheet(true);
   }
 
   private unfreeze(): void {
     this.currentSheet().frozen = { rows:0, cols:0 };
-    this.switchSheet();
+    this.switchSheet(true);
   }
 
   private freezeAtSelection(): void {
@@ -1839,7 +1830,7 @@ export class EngSheetView extends FileView {
     const cols = Math.max(0, this.sel.c1);
     const s = this.currentSheet();
     s.frozen = { rows, cols };
-    this.switchSheet();
+    this.switchSheet(true);
   }
 
   // ─── Column resize ────────────────────────────────────────────────────────────
@@ -2317,7 +2308,7 @@ export class EngSheetView extends FileView {
 
   // ─── Sheet ops ────────────────────────────────────────────────────────────────
 
-  private switchSheet(): void {
+  private switchSheet(markDirty = false): void {
     this.undoStack = [];
     this.redoStack = [];
     this.sel = { r0:0, c0:0, r1:0, c1:0 };
@@ -2328,7 +2319,7 @@ export class EngSheetView extends FileView {
     this.updateSelection();
     this.refreshFormulaBar();
     this.renderTabs();
-    this.markDirty();
+    if (markDirty) this.markDirty();
   }
 
   private getVisibleSheetIndices(): number[] {
@@ -2340,14 +2331,14 @@ export class EngSheetView extends FileView {
   private addSheet(): void {
     this.fileData.sheets.push(emptySheet(`Sheet${this.fileData.sheets.length+1}`));
     this.activeSheet = this.fileData.sheets.length-1;
-    this.switchSheet();
+    this.switchSheet(true);
   }
 
   private deleteSheetAt(idx: number): void {
     if (this.fileData.sheets.length<=1) { new Notice("Cannot delete the only sheet."); return; }
     this.fileData.sheets.splice(idx,1);
     this.activeSheet = Math.min(this.activeSheet, this.fileData.sheets.length-1);
-    this.switchSheet();
+    this.switchSheet(true);
   }
 
   private hideSheet(idx: number): void {
@@ -2363,7 +2354,7 @@ export class EngSheetView extends FileView {
       const next = this.getVisibleSheetIndices().find((i) => i !== idx);
       if (next !== undefined) this.activeSheet = next;
     }
-    this.switchSheet();
+    this.switchSheet(true);
   }
 
   private unhideSheetPrompt(): void {
@@ -2385,7 +2376,7 @@ export class EngSheetView extends FileView {
     }
     match.s.hidden = false;
     this.activeSheet = match.i;
-    this.switchSheet();
+    this.switchSheet(true);
   }
 
   private setSheetTabColor(idx: number): void {
@@ -2475,7 +2466,7 @@ export class EngSheetView extends FileView {
     copy.name += " (2)";
     this.fileData.sheets.splice(idx+1,0,copy);
     this.activeSheet = idx+1;
-    this.switchSheet();
+    this.switchSheet(true);
   }
 
   // ─── EXPORT() ────────────────────────────────────────────────────────────────
