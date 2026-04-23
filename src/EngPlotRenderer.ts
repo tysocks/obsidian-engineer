@@ -20,6 +20,26 @@ interface SeriesData {
   yAxis: "left" | "right";
 }
 
+interface ReferenceLine {
+  orientation: "h" | "v";
+  value: number;
+  axis: "left" | "right" | "x";
+  label?: string;
+  color?: string;
+  dash?: string;
+}
+
+interface PlotRegion {
+  xMin?: number;
+  xMax?: number;
+  yMin?: number;
+  yMax?: number;
+  yAxis: "left" | "right";
+  label?: string;
+  color?: string;
+  opacity: number;
+}
+
 type PlotType = "line" | "scatter" | "bar" | "hbar" | "area" | "pie" | "donut";
 
 const PALETTE = ["#3b82f6", "#ef4444", "#10b981", "#f59e0b", "#8b5cf6", "#14b8a6"];
@@ -68,7 +88,18 @@ export class EngPlotRenderer {
     const options = (cfg["options"] as Record<string, unknown> | undefined) ?? {};
     const showLegend = options["legend"] !== false;
     const showGrid = options["grid"] !== false;
-    const references = this.parseReferences(cfg["reference"], ctx.sourcePath);
+    const hRefs = this.parseReferenceLines(cfg["reference"], "h", ctx.sourcePath);
+    const hRefsExplicit = this.parseReferenceLines(
+      cfg["h-reference"] ?? cfg["h-references"] ?? cfg["y-reference"] ?? cfg["y-references"],
+      "h",
+      ctx.sourcePath
+    );
+    const vRefs = this.parseReferenceLines(
+      cfg["v-reference"] ?? cfg["v-references"] ?? cfg["x-reference"] ?? cfg["x-references"],
+      "v",
+      ctx.sourcePath
+    );
+    const regions = this.parseRegions(cfg["regions"] ?? cfg["region"], ctx.sourcePath);
 
     try {
       const series = await this.loadSeries(cfg, ctx.sourcePath);
@@ -76,7 +107,18 @@ export class EngPlotRenderer {
         this.renderError(el, "No data found for engplot.");
         return;
       }
-      this.renderSvgPlot(el, { type, title, xLabel, yLabel, y2Label, series, showLegend, showGrid, references });
+      this.renderSvgPlot(el, {
+        type,
+        title,
+        xLabel,
+        yLabel,
+        y2Label,
+        series,
+        showLegend,
+        showGrid,
+        referenceLines: [...hRefs, ...hRefsExplicit, ...vRefs],
+        regions,
+      });
     } catch (err) {
       this.renderError(el, String(err));
     }
@@ -170,10 +212,11 @@ export class EngPlotRenderer {
       series: SeriesData[];
       showLegend: boolean;
       showGrid: boolean;
-      references: number[];
+      referenceLines: ReferenceLine[];
+      regions: PlotRegion[];
     }
   ): void {
-    const { type, title, xLabel, yLabel, y2Label, series, showLegend, showGrid, references } = params;
+    const { type, title, xLabel, yLabel, y2Label, series, showLegend, showGrid, referenceLines, regions } = params;
     const wrap = el.createDiv({ cls: "eng-plot-wrap" });
     if (title) wrap.createDiv({ cls: "eng-plot-title", text: title });
     const width = 720;
@@ -200,7 +243,16 @@ export class EngPlotRenderer {
     const rightMax = Math.max(1, ...(rightY.length > 0 ? rightY : [leftMax]));
 
     const catCount = Math.max(...series.map((s) => s.y.length));
-    const sx = (i: number) => margin.left + (catCount <= 1 ? w / 2 : (i / (catCount - 1)) * w);
+    const numericX = series.every((s) => s.x.length > 0 && s.x.every((v) => typeof v === "number" && Number.isFinite(v)));
+    const xValues = numericX ? series.flatMap((s) => s.x as number[]) : [];
+    const xMin = numericX ? Math.min(...xValues) : 0;
+    const xMax = numericX ? Math.max(...xValues) : Math.max(1, catCount - 1);
+    const sxByIndex = (i: number) => margin.left + (catCount <= 1 ? w / 2 : (i / (catCount - 1)) * w);
+    const sxByValue = (v: number) => margin.left + ((v - xMin) / (xMax - xMin || 1)) * w;
+    const sx = (s: SeriesData, i: number) => {
+      if (numericX && typeof s.x[i] === "number") return sxByValue(s.x[i] as number);
+      return sxByIndex(i);
+    };
     const syLeft = (v: number) => margin.top + h - ((v - leftMin) / (leftMax - leftMin || 1)) * h;
     const syRight = (v: number) => margin.top + h - ((v - rightMin) / (rightMax - rightMin || 1)) * h;
     const syForSeries = (s: SeriesData, v: number) => (s.yAxis === "right" ? syRight(v) : syLeft(v));
@@ -213,6 +265,39 @@ export class EngPlotRenderer {
         });
       }
     }
+    this.drawTicks(svg, {
+      marginLeft: margin.left,
+      marginTop: margin.top,
+      width: w,
+      height: h,
+      leftMin,
+      leftMax,
+      rightMin,
+      rightMax,
+      hasRightAxis,
+      numericX,
+      xMin,
+      xMax,
+      xLabelSource: series[0]?.x ?? [],
+      sxByIndex,
+      sxByValue,
+      syLeft,
+      syRight,
+    });
+
+    this.drawRegions(svg, regions, {
+      xMin,
+      xMax,
+      numericX,
+      sxByIndex,
+      sxByValue,
+      syLeft,
+      syRight,
+      top: margin.top,
+      bottom: margin.top + h,
+      left: margin.left,
+      right: margin.left + w,
+    });
     svg.createSvg("line", {
       attr: {
         x1: String(margin.left),
@@ -243,21 +328,28 @@ export class EngPlotRenderer {
       });
     }
 
-    for (const ref of references) {
-      const y = syLeft(ref);
-      svg.createSvg("line", {
-        attr: { x1: String(margin.left), y1: String(y), x2: String(margin.left + w), y2: String(y), class: "eng-plot-reference" },
-      });
-    }
+    this.drawReferenceLines(svg, referenceLines, {
+      xMin,
+      xMax,
+      numericX,
+      sxByIndex,
+      sxByValue,
+      syLeft,
+      syRight,
+      top: margin.top,
+      bottom: margin.top + h,
+      left: margin.left,
+      right: margin.left + w,
+    });
 
     if (type === "bar" || type === "hbar") {
       this.drawBars(svg, series, type, margin.left, margin.top, w, h, leftMin, leftMax, rightMin, rightMax);
     } else {
       for (const s of series) {
-        const pts = s.y.map((v, i) => `${sx(i)},${syForSeries(s, v)}`).join(" ");
+        const pts = s.y.map((v, i) => `${sx(s, i)},${syForSeries(s, v)}`).join(" ");
         if (type === "area") {
           const base = s.yAxis === "right" ? rightMin : leftMin;
-          const areaPts = `${sx(0)},${syForSeries(s, base)} ${pts} ${sx(s.y.length - 1)},${syForSeries(s, base)}`;
+          const areaPts = `${sx(s, 0)},${syForSeries(s, base)} ${pts} ${sx(s, s.y.length - 1)},${syForSeries(s, base)}`;
           svg.createSvg("polygon", { attr: { points: areaPts, fill: s.color ?? PALETTE[0], "fill-opacity": "0.22" } });
         }
         if (type === "line" || type === "area") {
@@ -268,7 +360,7 @@ export class EngPlotRenderer {
         if (type === "scatter" || type === "line" || type === "area") {
           for (let i = 0; i < s.y.length; i++) {
             svg.createSvg("circle", {
-              attr: { cx: String(sx(i)), cy: String(syForSeries(s, s.y[i])), r: "3.2", fill: s.color ?? PALETTE[0] },
+              attr: { cx: String(sx(s, i)), cy: String(syForSeries(s, s.y[i])), r: "3.2", fill: s.color ?? PALETTE[0] },
             });
           }
         }
@@ -388,15 +480,263 @@ export class EngPlotRenderer {
     }
   }
 
-  private parseReferences(input: unknown, sourcePath: string): number[] {
+  private parseReferenceLines(
+    input: unknown,
+    orientation: "h" | "v",
+    sourcePath: string
+  ): ReferenceLine[] {
     const values: unknown[] = Array.isArray(input) ? input : input ? [input] : [];
-    const refs: number[] = [];
+    const refs: ReferenceLine[] = [];
     for (const item of values) {
-      const val = item && typeof item === "object" ? (item as Record<string, unknown>)["value"] : item;
+      const obj = item && typeof item === "object" ? (item as Record<string, unknown>) : null;
+      const val = obj ? obj["value"] : item;
       const n = this.resolveDynamicNumber(val, sourcePath);
-      if (n !== null && Number.isFinite(n)) refs.push(n);
+      if (n === null || !Number.isFinite(n)) continue;
+      const axisRaw = obj?.["axis"];
+      const axis = orientation === "h"
+        ? this.normalizeAxis(axisRaw) // left or right
+        : "x";
+      refs.push({
+        orientation,
+        value: n,
+        axis,
+        label: typeof obj?.["label"] === "string" ? String(obj["label"]) : undefined,
+        color: typeof obj?.["color"] === "string" ? String(obj["color"]) : undefined,
+        dash: typeof obj?.["dash"] === "string" ? String(obj["dash"]) : undefined,
+      });
     }
     return refs;
+  }
+
+  private parseRegions(input: unknown, sourcePath: string): PlotRegion[] {
+    const values: unknown[] = Array.isArray(input) ? input : input ? [input] : [];
+    const out: PlotRegion[] = [];
+    for (const item of values) {
+      if (!item || typeof item !== "object") continue;
+      const obj = item as Record<string, unknown>;
+      const xMin = this.resolveDynamicNumber(obj["x-min"] ?? obj["x0"] ?? obj["xmin"], sourcePath);
+      const xMax = this.resolveDynamicNumber(obj["x-max"] ?? obj["x1"] ?? obj["xmax"], sourcePath);
+      const yMin = this.resolveDynamicNumber(obj["y-min"] ?? obj["y0"] ?? obj["ymin"], sourcePath);
+      const yMax = this.resolveDynamicNumber(obj["y-max"] ?? obj["y1"] ?? obj["ymax"], sourcePath);
+      if (xMin === null && xMax === null && yMin === null && yMax === null) continue;
+      const yAxis = this.normalizeAxis(obj["axis"] ?? obj["y-axis"]);
+      const opacityRaw = Number(obj["opacity"]);
+      out.push({
+        xMin: xMin ?? undefined,
+        xMax: xMax ?? undefined,
+        yMin: yMin ?? undefined,
+        yMax: yMax ?? undefined,
+        yAxis,
+        label: typeof obj["label"] === "string" ? String(obj["label"]) : undefined,
+        color: typeof obj["color"] === "string" ? String(obj["color"]) : undefined,
+        opacity: Number.isFinite(opacityRaw) ? Math.max(0.05, Math.min(0.7, opacityRaw)) : 0.14,
+      });
+    }
+    return out;
+  }
+
+  private drawTicks(
+    svg: SVGElement,
+    p: {
+      marginLeft: number;
+      marginTop: number;
+      width: number;
+      height: number;
+      leftMin: number;
+      leftMax: number;
+      rightMin: number;
+      rightMax: number;
+      hasRightAxis: boolean;
+      numericX: boolean;
+      xMin: number;
+      xMax: number;
+      xLabelSource: (number | string)[];
+      sxByIndex: (i: number) => number;
+      sxByValue: (v: number) => number;
+      syLeft: (v: number) => number;
+      syRight: (v: number) => number;
+    }
+  ): void {
+    const yTicksLeft = this.generateTicks(p.leftMin, p.leftMax, 6);
+    for (const t of yTicksLeft) {
+      const y = p.syLeft(t);
+      svg.createSvg("line", {
+        attr: { x1: String(p.marginLeft - 5), y1: String(y), x2: String(p.marginLeft), y2: String(y), class: "eng-plot-tick" },
+      });
+      const label = svg.createSvg("text", {
+        attr: { x: String(p.marginLeft - 8), y: String(y + 3), "text-anchor": "end", class: "eng-plot-tick-label" },
+      });
+      label.textContent = this.formatTickNumber(t);
+    }
+
+    if (p.hasRightAxis) {
+      const yTicksRight = this.generateTicks(p.rightMin, p.rightMax, 6);
+      for (const t of yTicksRight) {
+        const y = p.syRight(t);
+        svg.createSvg("line", {
+          attr: {
+            x1: String(p.marginLeft + p.width),
+            y1: String(y),
+            x2: String(p.marginLeft + p.width + 5),
+            y2: String(y),
+            class: "eng-plot-tick",
+          },
+        });
+        const label = svg.createSvg("text", {
+          attr: { x: String(p.marginLeft + p.width + 8), y: String(y + 3), "text-anchor": "start", class: "eng-plot-tick-label" },
+        });
+        label.textContent = this.formatTickNumber(t);
+      }
+    }
+
+    if (p.numericX) {
+      const xTicks = this.generateTicks(p.xMin, p.xMax, 6);
+      for (const t of xTicks) {
+        const x = p.sxByValue(t);
+        const y0 = p.marginTop + p.height;
+        svg.createSvg("line", { attr: { x1: String(x), y1: String(y0), x2: String(x), y2: String(y0 + 5), class: "eng-plot-tick" } });
+        const label = svg.createSvg("text", {
+          attr: { x: String(x), y: String(y0 + 16), "text-anchor": "middle", class: "eng-plot-tick-label" },
+        });
+        label.textContent = this.formatTickNumber(t);
+      }
+    } else {
+      const ticks = Math.min(6, Math.max(2, p.xLabelSource.length || 2));
+      for (let i = 0; i < ticks; i++) {
+        const idx = Math.round((i / (ticks - 1 || 1)) * Math.max(0, p.xLabelSource.length - 1));
+        const x = p.sxByIndex(idx);
+        const y0 = p.marginTop + p.height;
+        svg.createSvg("line", { attr: { x1: String(x), y1: String(y0), x2: String(x), y2: String(y0 + 5), class: "eng-plot-tick" } });
+        const label = svg.createSvg("text", {
+          attr: { x: String(x), y: String(y0 + 16), "text-anchor": "middle", class: "eng-plot-tick-label" },
+        });
+        const raw = p.xLabelSource[idx];
+        label.textContent = String(raw ?? idx + 1).slice(0, 12);
+      }
+    }
+  }
+
+  private drawReferenceLines(
+    svg: SVGElement,
+    refs: ReferenceLine[],
+    p: {
+      xMin: number;
+      xMax: number;
+      numericX: boolean;
+      sxByIndex: (i: number) => number;
+      sxByValue: (v: number) => number;
+      syLeft: (v: number) => number;
+      syRight: (v: number) => number;
+      top: number;
+      bottom: number;
+      left: number;
+      right: number;
+    }
+  ): void {
+    for (const ref of refs) {
+      if (ref.orientation === "h") {
+        const y = ref.axis === "right" ? p.syRight(ref.value) : p.syLeft(ref.value);
+        const line = svg.createSvg("line", {
+          attr: { x1: String(p.left), y1: String(y), x2: String(p.right), y2: String(y), class: "eng-plot-reference" },
+        });
+        if (ref.color) line.setAttribute("stroke", ref.color);
+        if (ref.dash) line.setAttribute("stroke-dasharray", ref.dash);
+        if (ref.label) {
+          const label = svg.createSvg("text", {
+            attr: { x: String(p.right - 4), y: String(y - 4), "text-anchor": "end", class: "eng-plot-reference-label" },
+          });
+          label.textContent = ref.label;
+        }
+      } else {
+        const x = p.numericX ? p.sxByValue(ref.value) : p.sxByIndex(ref.value - 1);
+        const line = svg.createSvg("line", {
+          attr: { x1: String(x), y1: String(p.top), x2: String(x), y2: String(p.bottom), class: "eng-plot-reference" },
+        });
+        if (ref.color) line.setAttribute("stroke", ref.color);
+        if (ref.dash) line.setAttribute("stroke-dasharray", ref.dash);
+        if (ref.label) {
+          const label = svg.createSvg("text", {
+            attr: { x: String(x + 4), y: String(p.top + 12), "text-anchor": "start", class: "eng-plot-reference-label" },
+          });
+          label.textContent = ref.label;
+        }
+      }
+    }
+  }
+
+  private drawRegions(
+    svg: SVGElement,
+    regions: PlotRegion[],
+    p: {
+      xMin: number;
+      xMax: number;
+      numericX: boolean;
+      sxByIndex: (i: number) => number;
+      sxByValue: (v: number) => number;
+      syLeft: (v: number) => number;
+      syRight: (v: number) => number;
+      top: number;
+      bottom: number;
+      left: number;
+      right: number;
+    }
+  ): void {
+    for (const region of regions) {
+      const x0 = region.xMin !== undefined
+        ? (p.numericX ? p.sxByValue(region.xMin) : p.sxByIndex(region.xMin - 1))
+        : p.left;
+      const x1 = region.xMax !== undefined
+        ? (p.numericX ? p.sxByValue(region.xMax) : p.sxByIndex(region.xMax - 1))
+        : p.right;
+      const sy = region.yAxis === "right" ? p.syRight : p.syLeft;
+      const y0 = region.yMax !== undefined ? sy(region.yMax) : p.top;
+      const y1 = region.yMin !== undefined ? sy(region.yMin) : p.bottom;
+      const left = Math.max(p.left, Math.min(x0, x1));
+      const right = Math.min(p.right, Math.max(x0, x1));
+      const top = Math.max(p.top, Math.min(y0, y1));
+      const bottom = Math.min(p.bottom, Math.max(y0, y1));
+      const width = Math.max(0, right - left);
+      const height = Math.max(0, bottom - top);
+      if (width < 1 || height < 1) continue;
+      const rect = svg.createSvg("rect", {
+        attr: {
+          x: String(left),
+          y: String(top),
+          width: String(width),
+          height: String(height),
+          class: "eng-plot-region",
+        },
+      });
+      rect.setAttribute("fill", region.color ?? "#14b8a6");
+      rect.setAttribute("fill-opacity", String(region.opacity));
+      if (region.label) {
+        const label = svg.createSvg("text", {
+          attr: { x: String(left + 4), y: String(top + 12), class: "eng-plot-reference-label" },
+        });
+        label.textContent = region.label;
+      }
+    }
+  }
+
+  private generateTicks(min: number, max: number, count: number): number[] {
+    const span = max - min;
+    if (!Number.isFinite(span) || span <= 0) return [min];
+    const rough = span / Math.max(1, count - 1);
+    const mag = Math.pow(10, Math.floor(Math.log10(Math.abs(rough))));
+    const normalized = rough / mag;
+    const stepNorm = normalized <= 1 ? 1 : normalized <= 2 ? 2 : normalized <= 5 ? 5 : 10;
+    const step = stepNorm * mag;
+    const start = Math.ceil(min / step) * step;
+    const out: number[] = [];
+    for (let v = start; v <= max + step * 0.25; v += step) out.push(v);
+    if (out.length === 0) out.push(min, max);
+    return out;
+  }
+
+  private formatTickNumber(v: number): string {
+    const abs = Math.abs(v);
+    if (abs >= 1e5 || (abs > 0 && abs < 1e-3)) return v.toExponential(2);
+    return Number(v.toPrecision(5)).toString();
   }
 
   private resolveDynamicNumber(raw: unknown, sourcePath: string): number | null {

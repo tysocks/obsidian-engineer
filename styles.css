@@ -1574,6 +1574,25 @@
   text-anchor: middle;
 }
 
+.eng-plot-tick {
+  stroke: var(--text-muted);
+  stroke-width: 1;
+}
+
+.eng-plot-tick-label {
+  fill: var(--text-muted);
+  font-size: 10px;
+}
+
+.eng-plot-reference-label {
+  fill: var(--text-muted);
+  font-size: 10px;
+}
+
+.eng-plot-region {
+  stroke: none;
+}
+
 .eng-plot-legend {
   display: flex;
   gap: 10px;

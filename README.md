@@ -508,7 +508,9 @@ Toggle individual sections in the sidebar on or off: File, Folder, Path, Tag, Gl
 
 ### ✅ Phase 6 — Data plotting + live linked tables
 
-`engplot` code fences render inline SVG charts in notes. Data can come from `.engsheet` ranges, vault CSV files, or inline arrays. Reference lines can use store expressions like `<<F_allow>>`. Charts rerender when source `.engsheet`/`.csv` files change.
+`engplot` code fences render inline SVG charts in notes. Data can come from `.engsheet` ranges, vault CSV files, or inline arrays. Charts rerender when source `.engsheet`/`.csv` files change.
+
+Axes now include tick marks and value labels for X and Y (including right Y axis when enabled).
 
 **Supported chart types:** line, scatter, bar, horizontal bar, area (filled line), pie, donut
 
@@ -519,7 +521,9 @@ Toggle individual sections in the sidebar on or off: File, Folder, Path, Tag, Gl
 | EngSheet column range | `source: data/results.engsheet`, `sheet: Sheet1`, `x: A2:A50` |
 | Vault CSV file | `source: data/results.csv`, `x: Load`, `y: Deflection` |
 | Inline arrays | `x: [1, 2, 3]`, `y: [10, 20, 15]` |
-| Store variable reference line | `reference: { label: "Allowable", value: "<<F_allow>>" }` |
+| Horizontal reference line | `reference: { label: "Allowable", value: "<<F_allow>>" }` |
+| Vertical reference line | `v-reference: { label: "Test point", value: 1800 }` |
+| Shaded region | `regions: [ { x-min: 1500, x-max: 2000, label: "ROI" } ]` |
 
 Dual-axis support is enabled per-series using `axis: left` or `axis: right`:
 
@@ -560,6 +564,55 @@ options:
   grid: true
 ```
 ````
+
+**Reference lines and regions:**
+
+````markdown
+```engplot
+type: scatter
+title: Pump performance
+x-label: Load (N)
+y-label: Deflection (mm)
+y2-label: Speed (m/s)
+series:
+  - name: Deflection
+    source: data/pump.engsheet
+    sheet: Sheet1
+    x: E2:E32
+    y: F2:F32
+    axis: left
+  - name: Speed
+    source: data/pump.engsheet
+    sheet: Sheet1
+    x: E2:E32
+    y: G2:G32
+    axis: right
+h-references:
+  - value: 12.5
+    axis: left
+    label: Deflection limit
+  - value: 2.1
+    axis: right
+    label: Speed target
+v-references:
+  - value: 1800
+    label: Test point
+regions:
+  - x-min: 1400
+    x-max: 2000
+    label: Operating window
+    color: "#22c55e"
+    opacity: 0.12
+options:
+  legend: true
+  grid: true
+```
+````
+
+Notes:
+- Per-series dual axis accepts both `axis: right` and `axis=right` syntax.
+- Horizontal line aliases: `reference`, `h-reference`, `h-references`, `y-reference`, `y-references`.
+- Vertical line aliases: `v-reference`, `v-references`, `x-reference`, `x-references`.
 
 **Fence syntax:**
 

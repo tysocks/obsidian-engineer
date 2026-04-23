@@ -44,13 +44,13 @@ export function parseFenceConfig(source: string): ParsedConfig {
       i++;
       continue;
     }
-    const top = trimmed.match(/^([^:]+):\s*(.*)$/);
+    const top = parseKeyValue(trimmed);
     if (!top) {
       i++;
       continue;
     }
-    const key = top[1].trim();
-    const inline = top[2].trim();
+    const key = top.key;
+    const inline = top.value;
 
     if (inline) {
       cfg[key] = parseScalar(inline);
@@ -96,15 +96,15 @@ function parseSeriesBlock(lines: string[], start: number): { value: ParsedConfig
       current = {};
       const remainder = trimmed.slice(2).trim();
       if (remainder) {
-        const m = remainder.match(/^([^:]+):\s*(.*)$/);
-        if (m) current[m[1].trim()] = parseScalar(m[2].trim());
+        const kv = parseKeyValue(remainder);
+        if (kv) current[kv.key] = parseScalar(kv.value);
       }
       i++;
       continue;
     }
     if (!current) current = {};
-    const m = trimmed.match(/^([^:]+):\s*(.*)$/);
-    if (m) current[m[1].trim()] = parseScalar(m[2].trim());
+    const kv = parseKeyValue(trimmed);
+    if (kv) current[kv.key] = parseScalar(kv.value);
     i++;
   }
   if (current) series.push(current);
@@ -128,14 +128,20 @@ function parseObjectBlock(
     const indent = leadingSpaces(line);
     if (indent < minIndent) break;
     const trimmed = line.trim();
-    const m = trimmed.match(/^([^:]+):\s*(.*)$/);
-    if (m) {
+    const kv = parseKeyValue(trimmed);
+    if (kv) {
       consumed = true;
-      obj[m[1].trim()] = parseScalar(m[2].trim());
+      obj[kv.key] = parseScalar(kv.value);
     }
     i++;
   }
   return { value: obj, next: i, consumed };
+}
+
+function parseKeyValue(line: string): { key: string; value: string } | null {
+  const m = line.match(/^([^:=]+)\s*[:=]\s*(.*)$/);
+  if (!m) return null;
+  return { key: m[1].trim(), value: m[2].trim() };
 }
 
 function parseScalar(raw: string): unknown {
