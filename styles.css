@@ -1463,6 +1463,18 @@
   font-weight: 500;
 }
 
+.eng-sheet-tab-rename-input {
+  width: 120px;
+  max-width: 160px;
+  height: 20px;
+  font-size: 12px;
+  padding: 1px 6px;
+  border: 1px solid var(--interactive-accent);
+  border-radius: 4px;
+  background: var(--background-primary);
+  color: var(--text-normal);
+}
+
 /* Autofill handle */
 .eng-fill-handle {
   position: absolute;
@@ -1488,6 +1500,262 @@
   outline: 2px solid var(--color-blue, #4a90e2) !important;
   outline-offset: -2px;
   background-color: color-mix(in srgb, var(--color-blue, #4a90e2) 15%, var(--background-primary)) !important;
+}
+
+/* ─── EngSheet UI overhaul layer ─────────────────────────────────────────── */
+
+.eng-sheet-container {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--background-secondary) 68%, var(--background-primary)) 0%,
+    var(--background-primary) 22%
+  );
+}
+
+.eng-sheet-toolbar {
+  border-bottom: 1px solid color-mix(in srgb, var(--background-modifier-border) 80%, transparent);
+  box-shadow: 0 1px 0 color-mix(in srgb, var(--background-modifier-border) 55%, transparent);
+}
+
+.eng-ribbon-tab-bar {
+  gap: 4px;
+  padding: 6px 8px 0;
+}
+
+.eng-ribbon-tab {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 6px 12px;
+  border-radius: 7px 7px 0 0;
+}
+
+.eng-ribbon-tab.active {
+  background: color-mix(in srgb, var(--interactive-accent) 16%, var(--background-primary));
+  color: var(--text-normal);
+  box-shadow: inset 0 -2px 0 var(--interactive-accent);
+}
+
+.eng-ribbon-area {
+  min-height: 66px;
+}
+
+.eng-ribbon-panel {
+  padding: 5px 8px;
+  gap: 6px;
+}
+
+.eng-ribbon-group {
+  border-right: 1px solid color-mix(in srgb, var(--background-modifier-border) 70%, transparent);
+  padding: 0 8px;
+}
+
+.eng-ribbon-group-body {
+  gap: 3px;
+  padding-bottom: 3px;
+}
+
+.eng-ribbon-group-label {
+  font-size: 9px;
+  letter-spacing: 0.05em;
+}
+
+.eng-rbn-btn,
+.eng-rbn-color-btn {
+  border: 1px solid transparent;
+  transition: background 0.12s ease, border-color 0.12s ease, transform 0.08s ease;
+}
+
+.eng-rbn-btn:hover,
+.eng-rbn-color-btn:hover {
+  border-color: color-mix(in srgb, var(--background-modifier-border) 90%, transparent);
+  transform: translateY(-1px);
+}
+
+.eng-rbn-btn.eng-rbn-btn-active {
+  border-color: color-mix(in srgb, var(--interactive-accent) 45%, var(--background-modifier-border));
+  background: color-mix(in srgb, var(--interactive-accent) 20%, var(--background-primary));
+}
+
+.eng-rbn-label {
+  font-size: 9px;
+  letter-spacing: 0.01em;
+}
+
+.eng-fmt-select {
+  height: 30px;
+  border-radius: 6px;
+}
+
+.eng-formula-bar {
+  height: 32px;
+  border-bottom: 1px solid color-mix(in srgb, var(--background-modifier-border) 80%, transparent);
+  background: color-mix(in srgb, var(--background-primary) 88%, var(--background-secondary));
+}
+
+.eng-name-box,
+.eng-formula-input {
+  transition: background 0.12s ease, box-shadow 0.12s ease;
+}
+
+.eng-name-box:focus,
+.eng-formula-input:focus {
+  background: color-mix(in srgb, var(--interactive-accent) 6%, var(--background-primary));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--interactive-accent) 40%, transparent);
+}
+
+.eng-formula-hint {
+  height: 20px;
+  line-height: 20px;
+  font-size: 11px;
+  color: var(--text-muted);
+  padding: 0 10px;
+  border-bottom: 1px solid color-mix(in srgb, var(--background-modifier-border) 75%, transparent);
+  background: color-mix(in srgb, var(--background-primary) 92%, var(--background-secondary));
+  font-family: var(--font-monospace);
+}
+
+.eng-find-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-bottom: 1px solid color-mix(in srgb, var(--background-modifier-border) 75%, transparent);
+  background: color-mix(in srgb, var(--background-secondary) 86%, var(--background-primary));
+}
+
+.eng-find-input {
+  height: 26px;
+  min-width: 160px;
+  border-radius: 6px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  color: var(--text-normal);
+  padding: 0 8px;
+  font-size: 12px;
+}
+
+.eng-find-btn {
+  height: 26px;
+  border-radius: 6px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  color: var(--text-normal);
+  padding: 0 10px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.eng-find-btn:hover {
+  background: var(--background-modifier-hover);
+}
+
+.eng-sheet-grid {
+  background:
+    linear-gradient(0deg, color-mix(in srgb, var(--background-modifier-border) 14%, transparent) 1px, transparent 1px),
+    linear-gradient(90deg, color-mix(in srgb, var(--background-modifier-border) 10%, transparent) 1px, transparent 1px),
+    var(--background-primary);
+  background-size: 24px 24px, 24px 24px, auto;
+}
+
+.eng-grid-table {
+  font-size: 12px;
+}
+
+.eng-corner,
+.eng-col-hdr,
+.eng-row-hdr {
+  backdrop-filter: blur(2px);
+}
+
+.eng-col-hdr,
+.eng-row-hdr {
+  color: color-mix(in srgb, var(--text-muted) 86%, var(--text-normal));
+}
+
+.eng-col-hdr.eng-hdr-sel,
+.eng-row-hdr.eng-hdr-sel {
+  background: color-mix(in srgb, var(--interactive-accent) 86%, #0000);
+  color: var(--text-on-accent);
+  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.18);
+}
+
+.eng-cell {
+  padding: 0 6px;
+  border-right: 1px solid color-mix(in srgb, var(--background-modifier-border) 78%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--background-modifier-border) 78%, transparent);
+  transition: background-color 0.06s linear;
+}
+
+.eng-cell:hover {
+  background: color-mix(in srgb, var(--interactive-accent) 4%, var(--background-primary));
+}
+
+.eng-cell.eng-cell-selected {
+  background-color: color-mix(in srgb, var(--interactive-accent) 24%, var(--background-primary)) !important;
+}
+
+.eng-cell.eng-cell-active {
+  outline: 2px solid var(--interactive-accent) !important;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--interactive-accent) 58%, transparent);
+}
+
+.eng-cell.eng-cell-cut {
+  border-style: dashed !important;
+}
+
+.eng-formula-dot {
+  width: 5px;
+  height: 5px;
+  top: 2px;
+  right: 2px;
+}
+
+.eng-cell-edit-input {
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--interactive-accent) 65%, transparent);
+  border-radius: 2px;
+}
+
+.eng-status-bar {
+  height: 24px;
+  padding: 0 12px;
+  border-top: 1px solid color-mix(in srgb, var(--background-modifier-border) 80%, transparent);
+  background: color-mix(in srgb, var(--background-secondary) 82%, var(--background-primary));
+}
+
+.eng-status-right {
+  gap: 12px;
+}
+
+.eng-sheet-tabs {
+  height: 30px;
+  border-top: 1px solid color-mix(in srgb, var(--background-modifier-border) 70%, transparent);
+  gap: 1px;
+  padding-right: 6px;
+}
+
+.eng-sheet-tab {
+  border-right: none;
+  border-radius: 8px 8px 0 0;
+  margin-top: 2px;
+  min-width: 64px;
+}
+
+.eng-sheet-tab.active {
+  border-top: none;
+  box-shadow:
+    inset 0 -2px 0 var(--interactive-accent),
+    0 -1px 0 color-mix(in srgb, var(--background-modifier-border) 65%, transparent);
+}
+
+.eng-tab-add-btn {
+  width: 30px;
+}
+
+.eng-fill-handle {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--background-primary) 75%, transparent);
 }
 
 /* ─── Live EngTable / EngPlot ─────────────────────────────────────────────── */

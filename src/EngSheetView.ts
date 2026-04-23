@@ -66,6 +66,8 @@ interface SheetData {
   numRows: number;
   numCols: number;
   frozen?: { rows: number; cols: number };
+  tabColor?: string;
+  hidden?: boolean;
 }
 
 interface EngSheetFile {
@@ -98,6 +100,11 @@ interface UndoEntry {
   changes: UndoChange[];
 }
 
+interface NamedRangeDef {
+  sheetIdx: number;
+  range: string;
+}
+
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const DEFAULT_COL_W = 120;
@@ -122,6 +129,20 @@ const NUMBER_FORMATS: [string, string][] = [
   ["0%",         "Percent"],
   ["0.00%",      "Percent (2dp)"],
 ];
+
+const FORMULA_HINTS: Record<string, string> = {
+  SUM: "SUM(number1, [number2], ...)",
+  AVERAGE: "AVERAGE(number1, [number2], ...)",
+  MIN: "MIN(number1, [number2], ...)",
+  MAX: "MAX(number1, [number2], ...)",
+  IF: "IF(condition, value_if_true, value_if_false)",
+  ROUND: "ROUND(number, num_digits)",
+  ABS: "ABS(number)",
+  SQRT: "SQRT(number)",
+  POWER: "POWER(number, power)",
+  COUNT: "COUNT(value1, [value2], ...)",
+  COUNTA: "COUNTA(value1, [value2], ...)",
+};
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -196,6 +217,9 @@ export class EngSheetView extends FileView {
   private activeRibbonTab: "home" | "data" | "view" = "home";
   private fillHandleEl: HTMLElement | null = null;
   private fillPreviewCells: HTMLTableCellElement[] = [];
+  private renamingSheetIdx: number | null = null;
+  private lastFindTerm = "";
+  private lastReplaceTerm = "";
   private undoStack: UndoEntry[] = [];
   private redoStack: UndoEntry[] = [];
   private _batchEntry: UndoEntry | null = null;
@@ -211,6 +235,11 @@ export class EngSheetView extends FileView {
   // DOM refs
   private nameBox!: HTMLInputElement;
   private formulaInput!: HTMLInputElement;
+  private formulaHintEl!: HTMLElement;
+  private findBarEl!: HTMLElement;
+  private findInputEl!: HTMLInputElement;
+  private replaceInputEl!: HTMLInputElement;
+  private formulaSuggestId = `eng-formula-suggest-${Math.random().toString(36).slice(2)}`;
   private fmtSelect!: HTMLSelectElement;
   private gridScrollEl!: HTMLElement;
   private sheetTabsEl!: HTMLElement;
@@ -238,6 +267,10 @@ export class EngSheetView extends FileView {
   async onLoadFile(file: TFile): Promise<void> {
     await this.loadHyperFormula();
     await this.readFileData(file);
+    if (this.currentSheet()?.hidden) {
+      const firstVisible = this.getVisibleSheetIndices()[0] ?? 0;
+      this.activeSheet = firstVisible;
+    }
     this.buildUI();
     this.rebuildHF();
     this.buildGrid();
@@ -387,6 +420,7 @@ export class EngSheetView extends FileView {
         s.cells ??= {}; s.colWidths ??= {}; s.rowHeights ??= {};
         s.numRows ??= DEFAULT_ROWS; s.numCols ??= DEFAULT_COLS;
         s.frozen ??= { rows: 0, cols: 0 };
+        s.hidden ??= false;
       }
       this.fileData = parsed;
     } catch { this.fileData = emptyFile(); }
@@ -417,6 +451,7 @@ export class EngSheetView extends FileView {
     container.oncontextmenu = (e) => e.preventDefault();
     this.buildToolbar(container);
     this.buildFormulaBar(container);
+    this.buildFindReplaceBar(container);
     this.gridScrollEl = container.createDiv({ cls: "eng-sheet-grid" });
     this.buildStatusBar(container);
     this.buildSheetTabs(container);
@@ -555,6 +590,15 @@ export class EngSheetView extends FileView {
     this.rBtn(sg, "arrow-up-a-z",   "Sort A → Z (ascending)",  () => this.sortColumn(true),  "A → Z");
     this.rBtn(sg, "arrow-down-z-a", "Sort Z → A (descending)", () => this.sortColumn(false), "Z → A");
 
+    const fg = this.grp(panel, "Find");
+    this.rBtn(fg, "search", "Find in sheet (Ctrl+F)", () => this.openFindReplaceBar("find"), "Find");
+    this.rBtn(fg, "replace", "Replace in sheet (Ctrl+H)", () => this.openFindReplaceBar("replace"), "Replace");
+
+    const ng = this.grp(panel, "Names");
+    this.rBtn(ng, "bookmark-plus", "Define named range from current selection", () => this.defineNamedRange(), "Define");
+    this.rBtn(ng, "navigation", "Go to named range", () => this.goToNamedRange(), "Go To");
+    this.rBtn(ng, "list", "Manage named ranges", () => this.manageNamedRanges(), "Manage");
+
     const ig = this.grp(panel, "CSV");
     this.rBtn(ig, "upload",   "Import CSV file into sheet at active cell", () => this.importCSV(),   "Import");
     this.rBtn(ig, "download", "Export sheet to CSV file",                  () => this.exportCSV(),   "Export");
@@ -564,6 +608,7 @@ export class EngSheetView extends FileView {
     const fg = this.grp(panel, "Freeze Panes");
     this.rBtn(fg, "lock",   "Freeze top row",      () => this.freezeRows(1), "Top Row");
     this.rBtn(fg, "lock",   "Freeze first column", () => this.freezeCols(1), "First Col");
+    this.rBtn(fg, "lock",   "Freeze panes at active cell", () => this.freezeAtSelection(), "At Cell");
     this.rBtn(fg, "unlock", "Unfreeze all",        () => this.unfreeze(),    "Unfreeze");
   }
 
@@ -599,8 +644,23 @@ export class EngSheetView extends FileView {
     this.nameBox.spellcheck = false;
     this.nameBox.onkeydown = (e) => {
       if (e.key === "Enter") {
-        const p = parseAddr(this.nameBox.value.toUpperCase().trim());
-        if (p) { this.setSelection(p.row, p.col, p.row, p.col); this.gridScrollEl.focus(); }
+        const raw = this.nameBox.value.toUpperCase().trim();
+        const p = parseAddr(raw);
+        if (p) { this.setSelection(p.row, p.col, p.row, p.col); this.gridScrollEl.focus(); return; }
+        const named = this.getNamedRanges()[raw];
+        if (named) {
+          const [a, b] = named.range.split(":");
+          const p1 = parseAddr(a);
+          const p2 = parseAddr(b ?? a);
+          if (p1 && p2) {
+            if (named.sheetIdx !== this.activeSheet) {
+              this.activeSheet = named.sheetIdx;
+              this.switchSheet();
+            }
+            this.setSelection(p1.row, p1.col, p2.row, p2.col);
+            this.gridScrollEl.focus();
+          }
+        }
       }
     };
 
@@ -610,10 +670,15 @@ export class EngSheetView extends FileView {
     this.formulaInput = bar.createEl("input", { cls: "eng-formula-input" }) as HTMLInputElement;
     this.formulaInput.type = "text";
     this.formulaInput.spellcheck = false;
+    this.formulaInput.setAttribute("list", this.formulaSuggestId);
+    bar.createEl("datalist", { attr: { id: this.formulaSuggestId } });
     this.formulaInput.onkeydown = (e) => {
       if (e.key === "Enter")  { this.commitFormulaBar(); this.gridScrollEl.focus(); }
-      if (e.key === "Escape") { this.refreshFormulaBar(); this.gridScrollEl.focus(); }
+      if (e.key === "Escape") { this.refreshFormulaBar(); this.updateFillHandle(); this.gridScrollEl.focus(); }
     };
+    this.formulaInput.oninput = () => this.updateFormulaAssist(this.formulaInput);
+    this.formulaHintEl = parent.createDiv({ cls: "eng-formula-hint" });
+    this.formulaHintEl.style.display = "none";
   }
 
   // ─── Status bar ──────────────────────────────────────────────────────────────
@@ -652,9 +717,11 @@ export class EngSheetView extends FileView {
       if (nums.length > 0) {
         const sum = nums.reduce((a,b)=>a+b,0);
         const avg = sum/nums.length;
+        const min = Math.min(...nums);
+        const max = Math.max(...nums);
         this.statusInfoEl.createSpan({
           cls: "eng-status-stats",
-          text: `Sum: ${applyFormat(sum)} · Count: ${nums.length} · Avg: ${applyFormat(avg)}`,
+          text: `Sum: ${applyFormat(sum)} · Count: ${nums.length} · Avg: ${applyFormat(avg)} · Min: ${applyFormat(min)} · Max: ${applyFormat(max)}`,
         });
       } else {
         const total = (sR1-sR0+1)*(sC1-sC0+1);
@@ -675,15 +742,73 @@ export class EngSheetView extends FileView {
     const addBtn = this.sheetTabsEl.createDiv({ cls: "eng-tab-add-btn", title: "New sheet" });
     setIcon(addBtn, "plus");
     addBtn.onclick = () => this.addSheet();
+    const unhideBtn = this.sheetTabsEl.createDiv({ cls: "eng-tab-add-btn", title: "Unhide sheet" });
+    setIcon(unhideBtn, "eye");
+    unhideBtn.onclick = () => this.unhideSheetPrompt();
 
-    this.fileData.sheets.forEach((sheet, idx) => {
+    const visible = this.getVisibleSheetIndices();
+    visible.forEach((idx) => {
+      const sheet = this.fileData.sheets[idx];
       const active = idx === this.activeSheet;
       const tab = this.sheetTabsEl.createDiv({ cls: "eng-sheet-tab" + (active ? " active" : "") });
       tab.dataset.sheetIdx = String(idx);
-      tab.createSpan({ text: sheet.name });
-      tab.onclick       = () => { this.activeSheet = idx; this.switchSheet(); };
-      tab.ondblclick    = (e) => { e.preventDefault(); e.stopPropagation(); this.renameSheet(idx); };
+      tab.draggable = true;
+      if (sheet.tabColor) {
+        tab.style.background = sheet.tabColor;
+        tab.style.color = "#fff";
+      }
+      let clickTimer: ReturnType<typeof setTimeout> | null = null;
+      if (this.renamingSheetIdx === idx) {
+        const input = tab.createEl("input", { cls: "eng-sheet-tab-rename-input" }) as HTMLInputElement;
+        input.type = "text";
+        input.value = sheet.name;
+        const cancel = () => {
+          this.renamingSheetIdx = null;
+          this.renderTabs();
+        };
+        const commit = () => {
+          this.commitRenameSheet(idx, input.value);
+        };
+        input.onkeydown = (e) => {
+          if (e.key === "Enter") { e.preventDefault(); e.stopPropagation(); commit(); }
+          if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); cancel(); }
+        };
+        input.onblur = () => commit();
+        requestAnimationFrame(() => {
+          input.focus();
+          input.select();
+        });
+      } else {
+        tab.createSpan({ text: sheet.name });
+      }
+      tab.onclick       = () => {
+        if (this.renamingSheetIdx !== null) return;
+        if (clickTimer) clearTimeout(clickTimer);
+        clickTimer = setTimeout(() => {
+          clickTimer = null;
+          this.activeSheet = idx;
+          this.switchSheet();
+        }, 160);
+      };
+      tab.ondblclick    = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (clickTimer) {
+          clearTimeout(clickTimer);
+          clickTimer = null;
+        }
+        this.renameSheet(idx);
+      };
       tab.oncontextmenu = (e) => { e.preventDefault(); this.showSheetContextMenu(e, idx); };
+      tab.ondragstart = (e) => {
+        e.dataTransfer?.setData("text/plain", String(idx));
+      };
+      tab.ondragover = (e) => e.preventDefault();
+      tab.ondrop = (e) => {
+        e.preventDefault();
+        const from = Number(e.dataTransfer?.getData("text/plain"));
+        if (Number.isFinite(from)) this.reorderSheet(from, idx);
+      };
     });
   }
 
@@ -691,6 +816,10 @@ export class EngSheetView extends FileView {
     const menu = new Menu();
     menu.addItem(i => i.setTitle("Rename").onClick(()    => this.renameSheet(idx)));
     menu.addItem(i => i.setTitle("Duplicate").onClick(() => this.duplicateSheet(idx)));
+    menu.addSeparator();
+    menu.addItem(i => i.setTitle("Set tab color…").onClick(() => this.setSheetTabColor(idx)));
+    menu.addItem(i => i.setTitle("Clear tab color").onClick(() => this.clearSheetTabColor(idx)));
+    menu.addItem(i => i.setTitle("Hide").onClick(() => this.hideSheet(idx)));
     menu.addSeparator();
     menu.addItem(i => i.setTitle("Delete").onClick(() => this.deleteSheetAt(idx)));
     menu.showAtMouseEvent(e);
@@ -729,6 +858,7 @@ export class EngSheetView extends FileView {
       th.createEl("span", { text: colLetter(c) });
       const rh = th.createEl("div", { cls: "eng-col-resize" });
       rh.onmousedown = (e) => this.startColResize(e, c);
+      rh.ondblclick = (e) => this.autoFitColumn(e, c);
       th.onclick = (e) => { if (!this.colResizing) this.selectCol(c, e.shiftKey); };
     }
 
@@ -749,6 +879,8 @@ export class EngSheetView extends FileView {
       for (let c = 0; c < sheet.numCols; c++) {
         const w  = sheet.colWidths[c] ?? DEFAULT_COL_W;
         const td = tr.createEl("td", { cls: "eng-cell" }) as HTMLTableCellElement;
+        td.dataset.r = String(r);
+        td.dataset.c = String(c);
         td.style.width = td.style.minWidth = td.style.maxWidth = w + "px";
         td.style.height = h + "px";
         if (r < frozen.rows && c < frozen.cols) {
@@ -1015,17 +1147,33 @@ export class EngSheetView extends FileView {
 
   private startMouseSelect(_startR: number, _startC: number): void {
     const doc = this.tableEl.ownerDocument;
+    let frame = 0;
+    let pendingR: number | null = null;
+    let pendingC: number | null = null;
+    const flush = () => {
+      frame = 0;
+      if (pendingR === null || pendingC === null) return;
+      this.extendSelection(pendingR, pendingC);
+      pendingR = null;
+      pendingC = null;
+    };
     const onMove = (e: MouseEvent) => {
       const el = doc.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null;
       const td = el?.closest?.("td") as HTMLTableCellElement | null;
       if (!td || td.closest("table") !== this.tableEl) return;
-      const tr = td.closest("tr") as HTMLTableRowElement;
-      const allRows = [...this.tbodyEl.querySelectorAll("tr")] as HTMLTableRowElement[];
-      const r = allRows.indexOf(tr);
-      const c = [...tr.querySelectorAll("td")].indexOf(td) - 1;
-      if (r >= 0 && c >= 0) this.extendSelection(r, c);
+      const r = Number(td.dataset.r);
+      const c = Number(td.dataset.c);
+      if (!Number.isFinite(r) || !Number.isFinite(c)) return;
+      pendingR = r;
+      pendingC = c;
+      if (!frame) frame = requestAnimationFrame(flush);
     };
-    const onUp = () => { doc.removeEventListener("mousemove", onMove); doc.removeEventListener("mouseup", onUp); };
+    const onUp = () => {
+      if (frame) cancelAnimationFrame(frame);
+      flush();
+      doc.removeEventListener("mousemove", onMove);
+      doc.removeEventListener("mouseup", onUp);
+    };
     doc.addEventListener("mousemove", onMove);
     doc.addEventListener("mouseup", onUp);
   }
@@ -1118,8 +1266,13 @@ export class EngSheetView extends FileView {
     }
     this.commitUndoBatch();
     const hasFormulas = affected.some(([r,c]) => sheet.cells[cellAddr(r,c)]?.f);
-    if (hasFormulas) { this.rebuildHF(); this.refreshAllCells(); }
-    else { affected.forEach(([r,c]) => this.refreshCell(r,c)); }
+    if (hasFormulas) {
+      this.rebuildHF();
+      this.refreshAllFormulaCells();
+      affected.forEach(([r,c]) => this.refreshCell(r,c));
+    } else {
+      affected.forEach(([r,c]) => this.refreshCell(r,c));
+    }
     this.markDirty();
   }
 
@@ -1171,6 +1324,7 @@ export class EngSheetView extends FileView {
     this.nameBox.value = cellAddr(r1,c1);
     const cell = this.currentSheet().cells[cellAddr(r1,c1)];
     this.formulaInput.value = cell?.f ?? (cell?.v !== null && cell?.v !== undefined ? String(cell.v) : "");
+    this.updateFormulaAssist(this.formulaInput);
   }
 
   private commitFormulaBar(): void {
@@ -1192,12 +1346,14 @@ export class EngSheetView extends FileView {
     const input = td.createEl("input", { cls: "eng-cell-edit-input" }) as HTMLInputElement;
     input.type  = "text";
     input.spellcheck = false;
+    input.setAttribute("list", this.formulaSuggestId);
     input.value = initialChar !== null ? initialChar : current;
     input.focus();
     if (initialChar === null) input.select(); else input.setSelectionRange(1,1);
 
     this.formulaInput.value = input.value;
     this._formulaEditInput = input;
+    this.updateFormulaAssist(input);
 
     input.oninput = () => {
       // Any typed character exits formula point mode
@@ -1207,6 +1363,7 @@ export class EngSheetView extends FileView {
         this.clearFormulaPointHighlight();
       }
       this.formulaInput.value = input.value;
+      this.updateFormulaAssist(input);
     };
 
     // Restore cell to a clean state before refreshCell runs — otherwise the
@@ -1339,10 +1496,8 @@ export class EngSheetView extends FileView {
       const el = doc.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null;
       const tdEl = el?.closest?.("td") as HTMLTableCellElement | null;
       if (!tdEl || tdEl.closest("table") !== this.tableEl) return;
-      const tr = tdEl.closest("tr") as HTMLTableRowElement;
-      const allRows = [...this.tbodyEl.querySelectorAll("tr")] as HTMLTableRowElement[];
-      const r = allRows.indexOf(tr);
-      const c = [...tr.querySelectorAll("td")].indexOf(tdEl) - 1;
+      const r = Number(tdEl.dataset.r);
+      const c = Number(tdEl.dataset.c);
       if (r < 0 || c < 0 || !this._formulaPoint || !this._formulaRefSpan) return;
 
       this._formulaPoint = { r0: startR, c0: startC, r1: r, c1: c };
@@ -1443,7 +1598,14 @@ export class EngSheetView extends FileView {
     if (this.editingCell) return;
     const { r1,c1 } = this.sel;
     if (e.ctrlKey || e.metaKey) {
+      if (e.key === " ") { e.preventDefault(); this.selectCol(c1, e.shiftKey); return; }
+      if (e.key === "ArrowUp")    { e.preventDefault(); this.ctrlNavigate("up", e.shiftKey); return; }
+      if (e.key === "ArrowDown")  { e.preventDefault(); this.ctrlNavigate("down", e.shiftKey); return; }
+      if (e.key === "ArrowLeft")  { e.preventDefault(); this.ctrlNavigate("left", e.shiftKey); return; }
+      if (e.key === "ArrowRight") { e.preventDefault(); this.ctrlNavigate("right", e.shiftKey); return; }
       switch(e.key.toLowerCase()) {
+        case "f": e.preventDefault(); this.openFindReplaceBar("find"); return;
+        case "h": e.preventDefault(); this.openFindReplaceBar("replace"); return;
         case "c": e.preventDefault(); this.copySelectionFull(); return;
         case "x": e.preventDefault(); this.cutSelection(); return;
         case "v":
@@ -1467,6 +1629,12 @@ export class EngSheetView extends FileView {
         case "s": e.preventDefault(); this.saveFile(); return;
         case "a": e.preventDefault(); this.selectAll(); return;
         case "home": e.preventDefault(); this.setSelection(0,0,0,0); return;
+        case "end": {
+          e.preventDefault();
+          const last = this.findLastUsedCell();
+          this.setSelection(last.r, last.c, last.r, last.c);
+          return;
+        }
         case "z":
           e.preventDefault();
           if (e.shiftKey) this.redo(); else this.undo();
@@ -1475,12 +1643,25 @@ export class EngSheetView extends FileView {
       }
     }
     switch(e.key) {
+      case " ":
+        if (e.shiftKey) {
+          e.preventDefault();
+          this.selectRow(r1, true);
+        }
+        break;
       case "ArrowUp":    e.preventDefault(); e.shiftKey?this.extendSelection(r1-1,c1):this.setSelection(r1-1,c1,r1-1,c1); break;
       case "ArrowDown":  e.preventDefault(); e.shiftKey?this.extendSelection(r1+1,c1):this.setSelection(r1+1,c1,r1+1,c1); break;
       case "ArrowLeft":  e.preventDefault(); e.shiftKey?this.extendSelection(r1,c1-1):this.setSelection(r1,c1-1,r1,c1-1); break;
       case "ArrowRight": e.preventDefault(); e.shiftKey?this.extendSelection(r1,c1+1):this.setSelection(r1,c1+1,r1,c1+1); break;
       case "Tab":   e.preventDefault(); e.shiftKey?this.setSelection(r1,c1-1,r1,c1-1):this.setSelection(r1,c1+1,r1,c1+1); break;
       case "Enter": e.preventDefault(); e.shiftKey?this.setSelection(r1-1,c1,r1-1,c1):this.setSelection(r1+1,c1,r1+1,c1); break;
+      case "Home": e.preventDefault(); e.shiftKey ? this.extendSelection(r1, 0) : this.setSelection(r1, 0, r1, 0); break;
+      case "End": {
+        e.preventDefault();
+        const targetC = this.findRowEndCell(r1);
+        e.shiftKey ? this.extendSelection(r1, targetC) : this.setSelection(r1, targetC, r1, targetC);
+        break;
+      }
       case "Delete": case "Backspace": e.preventDefault(); this.clearSelection(); break;
       case "F2": { e.preventDefault(); const td=this.cellEls[r1]?.[c1]; if(td) this.startEdit(r1,c1,td); break; }
       case "Escape": this.clipboard=null; break;
@@ -1581,6 +1762,7 @@ export class EngSheetView extends FileView {
     const minC=Math.min(c0,c1), maxC=Math.max(c0,c1);
     const sortC = minC;
     const sheet = this.currentSheet();
+    const affected: Array<[number, number]> = [];
 
     // Snapshot affected cells before sort
     for (let r=sR0; r<=sR1; r++)
@@ -1615,6 +1797,7 @@ export class EngSheetView extends FileView {
         const cell = rows[i][c];
         if (cell) sheet.cells[cellAddr(r,c)] = cell;
         else delete sheet.cells[cellAddr(r,c)];
+        affected.push([r, c]);
       }
     }
 
@@ -1627,7 +1810,8 @@ export class EngSheetView extends FileView {
     this.commitUndoBatch();
 
     this.rebuildHF();
-    this.refreshAllCells();
+    this.refreshAllFormulaCells();
+    for (const [r, c] of affected) this.refreshCell(r, c);
     this.markDirty();
   }
 
@@ -1647,6 +1831,14 @@ export class EngSheetView extends FileView {
 
   private unfreeze(): void {
     this.currentSheet().frozen = { rows:0, cols:0 };
+    this.switchSheet();
+  }
+
+  private freezeAtSelection(): void {
+    const rows = Math.max(0, this.sel.r1);
+    const cols = Math.max(0, this.sel.c1);
+    const s = this.currentSheet();
+    s.frozen = { rows, cols };
     this.switchSheet();
   }
 
@@ -1676,6 +1868,325 @@ export class EngSheetView extends FileView {
     };
     doc.addEventListener("mousemove", onMove);
     doc.addEventListener("mouseup", onUp);
+  }
+
+  private autoFitColumn(e: MouseEvent, colIdx: number): void {
+    e.preventDefault();
+    e.stopPropagation();
+    const sheet = this.currentSheet();
+    let maxChars = 6;
+    for (let r = 0; r < sheet.numRows; r++) {
+      const formatted = applyFormat(this.getComputedValue(r, colIdx), sheet.cells[cellAddr(r, colIdx)]?.style?.format);
+      maxChars = Math.max(maxChars, formatted.length);
+    }
+    // Approximate text width: ~8px per char + cell padding
+    const newW = Math.min(420, Math.max(60, Math.round(maxChars * 8 + 24)));
+    sheet.colWidths[colIdx] = newW;
+    const th = this.theadEl?.querySelectorAll("th")[colIdx+1] as HTMLElement|null;
+    if (th) th.style.width = th.style.minWidth = th.style.maxWidth = newW + "px";
+    for (let r = 0; r < sheet.numRows; r++) {
+      const td = this.cellEls[r]?.[colIdx];
+      if (td) td.style.width = td.style.minWidth = td.style.maxWidth = newW + "px";
+    }
+    this.markDirty();
+  }
+
+  private buildFindReplaceBar(parent: HTMLElement): void {
+    const bar = parent.createDiv({ cls: "eng-find-bar" });
+    bar.style.display = "none";
+    this.findBarEl = bar;
+
+    this.findInputEl = bar.createEl("input", {
+      cls: "eng-find-input",
+      attr: { type: "text", placeholder: "Find in sheet..." },
+    }) as HTMLInputElement;
+    this.replaceInputEl = bar.createEl("input", {
+      cls: "eng-find-input",
+      attr: { type: "text", placeholder: "Replace with..." },
+    }) as HTMLInputElement;
+
+    const findNextBtn = bar.createEl("button", { cls: "eng-find-btn", text: "Next" });
+    const replaceBtn = bar.createEl("button", { cls: "eng-find-btn", text: "Replace all" });
+    const closeBtn = bar.createEl("button", { cls: "eng-find-btn", text: "Close" });
+
+    this.findInputEl.onkeydown = (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        this.findNext(this.findInputEl.value.trim(), true);
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        this.closeFindReplaceBar();
+      }
+    };
+    this.replaceInputEl.onkeydown = (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        this.replaceAll(this.findInputEl.value.trim(), this.replaceInputEl.value);
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        this.closeFindReplaceBar();
+      }
+    };
+    findNextBtn.onclick = () => this.findNext(this.findInputEl.value.trim(), true);
+    replaceBtn.onclick = () => this.replaceAll(this.findInputEl.value.trim(), this.replaceInputEl.value);
+    closeBtn.onclick = () => this.closeFindReplaceBar();
+  }
+
+  private openFindReplaceBar(mode: "find" | "replace"): void {
+    if (!this.findBarEl) return;
+    this.findBarEl.style.display = "";
+    const seed = this.lastFindTerm || this.getCellDisplay(this.sel.r1, this.sel.c1);
+    this.findInputEl.value = seed;
+    if (mode === "replace") {
+      this.replaceInputEl.value = this.lastReplaceTerm;
+      this.replaceInputEl.focus();
+      this.replaceInputEl.select();
+    } else {
+      this.findInputEl.focus();
+      this.findInputEl.select();
+    }
+  }
+
+  private closeFindReplaceBar(): void {
+    if (!this.findBarEl) return;
+    this.findBarEl.style.display = "none";
+    this.gridScrollEl?.focus();
+  }
+
+  private findNext(term: string, wrap = false): void {
+    if (!term) return;
+    this.lastFindTerm = term;
+    const s = this.currentSheet();
+    const total = s.numRows * s.numCols;
+    const start = this.sel.r1 * s.numCols + this.sel.c1 + 1;
+    for (let i = 0; i < total; i++) {
+      const idx = wrap ? (start + i) % total : start + i;
+      if (idx >= total) break;
+      const r = Math.floor(idx / s.numCols);
+      const c = idx % s.numCols;
+      if (this.getCellDisplay(r, c).toLowerCase().includes(term.toLowerCase())) {
+        this.setSelection(r, c, r, c);
+        return;
+      }
+    }
+    new Notice(`No match found for "${term}".`);
+  }
+
+  private replaceAll(find: string, replace: string): void {
+    if (!find) return;
+    this.lastFindTerm = find;
+    this.lastReplaceTerm = replace;
+    const s = this.currentSheet();
+    let changed = 0;
+    this.startUndoBatch();
+    const target = find.toLowerCase();
+    for (let r = 0; r < s.numRows; r++) {
+      for (let c = 0; c < s.numCols; c++) {
+        const addr = cellAddr(r, c);
+        const cell = s.cells[addr];
+        if (!cell) continue;
+        if (cell.f) {
+          if (cell.f.toLowerCase().includes(target)) {
+            const before = JSON.parse(JSON.stringify(cell)) as CellData;
+            cell.f = this.replaceInsensitive(cell.f, find, replace);
+            this.recordCellChange(r, c, before);
+            changed++;
+          }
+          continue;
+        }
+        if (typeof cell.v === "string" && cell.v.toLowerCase().includes(target)) {
+          const before = JSON.parse(JSON.stringify(cell)) as CellData;
+          cell.v = this.replaceInsensitive(cell.v, find, replace);
+          this.recordCellChange(r, c, before);
+          changed++;
+        }
+      }
+    }
+    this.commitUndoBatch();
+    if (changed > 0) {
+      this.rebuildHF();
+      this.refreshAllFormulaCells();
+      this.refreshAllCells();
+      this.markDirty();
+      this.flashStatus(`Replaced ${changed} match${changed === 1 ? "" : "es"}.`);
+    } else {
+      this.flashStatus("No matches to replace.");
+    }
+  }
+
+  private getCellDisplay(r: number, c: number): string {
+    const cell = this.currentSheet().cells[cellAddr(r, c)];
+    if (!cell) return "";
+    if (cell.f) return cell.f;
+    return String(cell.v ?? "");
+  }
+
+  private replaceInsensitive(input: string, find: string, replace: string): string {
+    const escaped = find.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return input.replace(new RegExp(escaped, "gi"), replace);
+  }
+
+  private getNamedRanges(): Record<string, NamedRangeDef> {
+    const raw = this.fileData.meta["namedRanges"];
+    if (!raw || typeof raw !== "object") return {};
+    return raw as Record<string, NamedRangeDef>;
+  }
+
+  private setNamedRanges(next: Record<string, NamedRangeDef>): void {
+    this.fileData.meta["namedRanges"] = next;
+    this.markDirty();
+  }
+
+  private defineNamedRange(): void {
+    const key = `${cellAddr(Math.min(this.sel.r0, this.sel.r1), Math.min(this.sel.c0, this.sel.c1))}:${cellAddr(Math.max(this.sel.r0, this.sel.r1), Math.max(this.sel.c0, this.sel.c1))}`;
+    const seed = this.nameBox.value.trim() || `Range_${cellAddr(this.sel.r1, this.sel.c1)}`;
+    const name = (this.containerEl.ownerDocument.defaultView ?? window).prompt("Named range name:", seed)?.trim().toUpperCase();
+    if (!name) return;
+    if (!/^[A-Z_][A-Z0-9_]*$/.test(name)) {
+      new Notice("Invalid name. Use letters, numbers, underscore; start with letter/underscore.");
+      return;
+    }
+    const ranges = this.getNamedRanges();
+    ranges[name] = { sheetIdx: this.activeSheet, range: key };
+    this.setNamedRanges(ranges);
+    this.flashStatus(`Named range "${name}" saved.`);
+  }
+
+  private goToNamedRange(): void {
+    const ranges = this.getNamedRanges();
+    const names = Object.keys(ranges).sort();
+    if (names.length === 0) {
+      new Notice("No named ranges defined.");
+      return;
+    }
+    const choice = (this.containerEl.ownerDocument.defaultView ?? window).prompt(`Go to named range:\n${names.join(", ")}`, names[0])?.trim().toUpperCase();
+    if (!choice || !ranges[choice]) return;
+    const def = ranges[choice];
+    const [a, b] = def.range.split(":");
+    const p1 = parseAddr(a);
+    const p2 = parseAddr(b ?? a);
+    if (!p1 || !p2) return;
+    if (def.sheetIdx !== this.activeSheet) {
+      this.activeSheet = def.sheetIdx;
+      this.switchSheet();
+    }
+    this.setSelection(p1.row, p1.col, p2.row, p2.col);
+  }
+
+  private manageNamedRanges(): void {
+    const ranges = this.getNamedRanges();
+    const names = Object.keys(ranges).sort();
+    if (names.length === 0) {
+      new Notice("No named ranges defined.");
+      return;
+    }
+    const lines = names.map((n) => `${n} -> ${this.fileData.sheets[ranges[n].sheetIdx]?.name ?? "?"}!${ranges[n].range}`).join("\n");
+    const remove = (this.containerEl.ownerDocument.defaultView ?? window)
+      .prompt(`Named ranges:\n${lines}\n\nType one name to delete:`, "")
+      ?.trim()
+      .toUpperCase();
+    if (!remove) return;
+    if (!ranges[remove]) {
+      new Notice(`Named range "${remove}" not found.`);
+      return;
+    }
+    delete ranges[remove];
+    this.setNamedRanges(ranges);
+    this.flashStatus(`Deleted named range "${remove}".`);
+  }
+
+  private updateFormulaAssist(input: HTMLInputElement): void {
+    const list = this.containerEl.querySelector(`#${this.formulaSuggestId}`) as HTMLDataListElement | null;
+    if (!list) return;
+    list.empty();
+
+    const value = input.value;
+    if (!value.startsWith("=")) {
+      if (this.formulaHintEl) this.formulaHintEl.style.display = "none";
+      return;
+    }
+    const pos = input.selectionStart ?? value.length;
+    const before = value.slice(1, pos).toUpperCase();
+    const token = (before.match(/([A-Z_][A-Z0-9_]*)$/)?.[1] ?? "").toUpperCase();
+
+    const pool = new Set<string>([
+      ...Object.keys(FORMULA_HINTS),
+      ...Object.keys(this.getNamedRanges()),
+      ...this.store.getAllEntries().map((e) => e.key.toUpperCase()),
+    ]);
+    const picks = [...pool].filter((k) => (token ? k.startsWith(token) : true)).slice(0, 20);
+    for (const p of picks) {
+      const opt = list.createEl("option");
+      opt.value = p;
+    }
+
+    const fn = before.match(/([A-Z_][A-Z0-9_]*)\($/)?.[1];
+    if (!this.formulaHintEl) return;
+    if (fn && FORMULA_HINTS[fn]) {
+      this.formulaHintEl.setText(FORMULA_HINTS[fn]);
+      this.formulaHintEl.style.display = "";
+    } else {
+      this.formulaHintEl.style.display = "none";
+    }
+  }
+
+  private isCellEmpty(r: number, c: number): boolean {
+    const cell = this.currentSheet().cells[cellAddr(r, c)];
+    if (!cell) return true;
+    if (cell.f && cell.f.trim() !== "") return false;
+    if (cell.v === null || cell.v === undefined) return true;
+    return String(cell.v).trim() === "";
+  }
+
+  private ctrlNavigate(dir: "up" | "down" | "left" | "right", shift: boolean): void {
+    const s = this.currentSheet();
+    let r = this.sel.r1;
+    let c = this.sel.c1;
+    const dR = dir === "up" ? -1 : dir === "down" ? 1 : 0;
+    const dC = dir === "left" ? -1 : dir === "right" ? 1 : 0;
+    const inBounds = (rr: number, cc: number) => rr >= 0 && rr < s.numRows && cc >= 0 && cc < s.numCols;
+    const startEmpty = this.isCellEmpty(r, c);
+
+    if (startEmpty) {
+      while (inBounds(r + dR, c + dC) && this.isCellEmpty(r + dR, c + dC)) {
+        r += dR;
+        c += dC;
+      }
+      if (inBounds(r + dR, c + dC)) {
+        r += dR;
+        c += dC;
+      }
+    } else {
+      while (inBounds(r + dR, c + dC) && !this.isCellEmpty(r + dR, c + dC)) {
+        r += dR;
+        c += dC;
+      }
+    }
+
+    if (shift) this.extendSelection(r, c);
+    else this.setSelection(r, c, r, c);
+  }
+
+  private findLastUsedCell(): { r: number; c: number } {
+    let maxR = 0;
+    let maxC = 0;
+    for (const addr of Object.keys(this.currentSheet().cells)) {
+      const p = parseAddr(addr);
+      if (!p) continue;
+      maxR = Math.max(maxR, p.row);
+      maxC = Math.max(maxC, p.col);
+    }
+    return { r: maxR, c: maxC };
+  }
+
+  private findRowEndCell(row: number): number {
+    const s = this.currentSheet();
+    for (let c = s.numCols - 1; c >= 0; c--) {
+      if (!this.isCellEmpty(row, c)) return c;
+    }
+    return s.numCols - 1;
   }
 
   // ─── Row / Column ops ─────────────────────────────────────────────────────────
@@ -1820,6 +2331,12 @@ export class EngSheetView extends FileView {
     this.markDirty();
   }
 
+  private getVisibleSheetIndices(): number[] {
+    const out: number[] = [];
+    this.fileData.sheets.forEach((s, i) => { if (!s.hidden) out.push(i); });
+    return out.length > 0 ? out : [0];
+  }
+
   private addSheet(): void {
     this.fileData.sheets.push(emptySheet(`Sheet${this.fileData.sheets.length+1}`));
     this.activeSheet = this.fileData.sheets.length-1;
@@ -1833,16 +2350,124 @@ export class EngSheetView extends FileView {
     this.switchSheet();
   }
 
-  private renameSheet(idx: number): void {
+  private hideSheet(idx: number): void {
+    const visible = this.getVisibleSheetIndices();
+    if (visible.length <= 1) {
+      new Notice("Cannot hide the only visible sheet.");
+      return;
+    }
     const sheet = this.fileData.sheets[idx];
     if (!sheet) return;
-    const viewWin = this.containerEl.ownerDocument.defaultView ?? window;
-    const name = viewWin.prompt("Sheet name:", sheet.name);
-    if (name?.trim()) {
-      sheet.name = name.trim();
-      this.markDirty();
-      this.renderTabs();
+    sheet.hidden = true;
+    if (this.activeSheet === idx) {
+      const next = this.getVisibleSheetIndices().find((i) => i !== idx);
+      if (next !== undefined) this.activeSheet = next;
     }
+    this.switchSheet();
+  }
+
+  private unhideSheetPrompt(): void {
+    const hidden = this.fileData.sheets
+      .map((s, i) => ({ s, i }))
+      .filter(({ s }) => !!s.hidden);
+    if (hidden.length === 0) {
+      new Notice("No hidden sheets.");
+      return;
+    }
+    const choice = (this.containerEl.ownerDocument.defaultView ?? window)
+      .prompt(`Unhide sheet:\n${hidden.map((h) => h.s.name).join(", ")}`, hidden[0].s.name)
+      ?.trim();
+    if (!choice) return;
+    const match = hidden.find((h) => h.s.name.toLowerCase() === choice.toLowerCase());
+    if (!match) {
+      new Notice(`Hidden sheet "${choice}" not found.`);
+      return;
+    }
+    match.s.hidden = false;
+    this.activeSheet = match.i;
+    this.switchSheet();
+  }
+
+  private setSheetTabColor(idx: number): void {
+    const sheet = this.fileData.sheets[idx];
+    if (!sheet) return;
+    const next = (this.containerEl.ownerDocument.defaultView ?? window)
+      .prompt("Tab color (hex, e.g. #2563eb):", sheet.tabColor ?? "#2563eb")
+      ?.trim();
+    if (!next) return;
+    if (!/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(next)) {
+      new Notice("Invalid color. Use #RGB or #RRGGBB.");
+      return;
+    }
+    sheet.tabColor = next;
+    this.markDirty();
+    this.renderTabs();
+  }
+
+  private clearSheetTabColor(idx: number): void {
+    const sheet = this.fileData.sheets[idx];
+    if (!sheet) return;
+    delete sheet.tabColor;
+    this.markDirty();
+    this.renderTabs();
+  }
+
+  private reorderSheet(fromIdx: number, toIdx: number): void {
+    if (fromIdx === toIdx) return;
+    const from = this.fileData.sheets[fromIdx];
+    if (!from || !this.fileData.sheets[toIdx]) return;
+    this.fileData.sheets.splice(fromIdx, 1);
+    this.fileData.sheets.splice(toIdx, 0, from);
+
+    if (this.activeSheet === fromIdx) this.activeSheet = toIdx;
+    else if (fromIdx < this.activeSheet && toIdx >= this.activeSheet) this.activeSheet--;
+    else if (fromIdx > this.activeSheet && toIdx <= this.activeSheet) this.activeSheet++;
+
+    const named = this.getNamedRanges();
+    const remap = (idx: number): number => {
+      if (idx === fromIdx) return toIdx;
+      if (fromIdx < toIdx && idx > fromIdx && idx <= toIdx) return idx - 1;
+      if (fromIdx > toIdx && idx >= toIdx && idx < fromIdx) return idx + 1;
+      return idx;
+    };
+    for (const def of Object.values(named)) def.sheetIdx = remap(def.sheetIdx);
+    this.fileData.meta["namedRanges"] = named;
+
+    this.markDirty();
+    this.renderTabs();
+  }
+
+  private renameSheet(idx: number): void {
+    if (!this.fileData.sheets[idx]) return;
+    this.renamingSheetIdx = idx;
+    this.renderTabs();
+  }
+
+  private commitRenameSheet(idx: number, rawName: string): void {
+    const sheet = this.fileData.sheets[idx];
+    this.renamingSheetIdx = null;
+    if (!sheet) {
+      this.renderTabs();
+      return;
+    }
+    const name = rawName.trim();
+    if (!name) {
+      this.renderTabs();
+      return;
+    }
+    if (name === sheet.name) {
+      this.renderTabs();
+      return;
+    }
+    const duplicate = this.fileData.sheets.some((s, i) => i !== idx && s.name.toLowerCase() === name.toLowerCase());
+    if (duplicate) {
+      new Notice(`Sheet "${name}" already exists.`);
+      this.renderTabs();
+      return;
+    }
+    sheet.name = name;
+    this.markDirty();
+    this.renderTabs();
   }
 
   private duplicateSheet(idx: number): void {
@@ -1877,6 +2502,7 @@ export class EngSheetView extends FileView {
   // ─── Autofill ────────────────────────────────────────────────────────────────
 
   private updateFillHandle(): void {
+    this.tableEl?.querySelectorAll(".eng-fill-handle").forEach((el) => el.remove());
     this.fillHandleEl?.remove();
     this.fillHandleEl = null;
     const { r0,c0,r1,c1 } = this.sel;
@@ -1900,21 +2526,34 @@ export class EngSheetView extends FileView {
     const sC0=Math.min(c0,c1), sC1=Math.max(c0,c1);
     let lastR = sR1, lastC = sC1;
     const doc = this.tableEl.ownerDocument;
+    let frame = 0;
+    let pendingR: number | null = null;
+    let pendingC: number | null = null;
+    const flush = () => {
+      frame = 0;
+      if (pendingR === null || pendingC === null) return;
+      lastR = pendingR;
+      lastC = pendingC;
+      this.updateFillPreview(sR0, sC0, sR1, sC1, lastR, lastC);
+      pendingR = null;
+      pendingC = null;
+    };
 
     const onMove = (e: MouseEvent) => {
       const el = doc.elementFromPoint(e.clientX, e.clientY) as HTMLElement | null;
       const td = el?.closest?.("td") as HTMLTableCellElement | null;
       if (!td || td.closest("table") !== this.tableEl) return;
-      const tr = td.closest("tr") as HTMLTableRowElement;
-      const allRows = [...this.tbodyEl.querySelectorAll("tr")] as HTMLTableRowElement[];
-      const r = allRows.indexOf(tr);
-      const c = [...tr.querySelectorAll("td")].indexOf(td) - 1;
-      if (r < 0 || c < 0) return;
-      lastR = r; lastC = c;
-      this.updateFillPreview(sR0, sC0, sR1, sC1, r, c);
+      const r = Number(td.dataset.r);
+      const c = Number(td.dataset.c);
+      if (r < 0 || c < 0 || !Number.isFinite(r) || !Number.isFinite(c)) return;
+      pendingR = r;
+      pendingC = c;
+      if (!frame) frame = requestAnimationFrame(flush);
     };
 
     const onUp = () => {
+      if (frame) cancelAnimationFrame(frame);
+      flush();
       doc.removeEventListener("mousemove", onMove);
       doc.removeEventListener("mouseup", onUp);
       this.clearFillPreview();
@@ -1955,6 +2594,7 @@ export class EngSheetView extends FileView {
     const fillRight = targetC > sC1;
     if (!fillDown && !fillRight) return;
     this.startUndoBatch();
+    const affected: Array<[number, number]> = [];
 
     if (fillDown) {
       const srcRows = sR1 - sR0 + 1;
@@ -1970,6 +2610,7 @@ export class EngSheetView extends FileView {
           else if (typeof src.v === "number") { const step = this.detectStep(sR0, sR1, c, "row", sheet); sheet.cells[dest] = { ...src, v: src.v + step * (r - srcR) }; }
           else { sheet.cells[dest] = { ...src }; }
           this.recordCellChange(r, c, before);
+          affected.push([r, c]);
         }
       }
     } else {
@@ -1986,13 +2627,15 @@ export class EngSheetView extends FileView {
           else if (typeof src.v === "number") { const step = this.detectStep(sC0, sC1, r, "col", sheet); sheet.cells[dest] = { ...src, v: src.v + step * (c - srcC) }; }
           else { sheet.cells[dest] = { ...src }; }
           this.recordCellChange(r, c, before);
+          affected.push([r, c]);
         }
       }
     }
 
     this.commitUndoBatch();
     this.rebuildHF();
-    this.refreshAllCells();
+    this.refreshAllFormulaCells();
+    for (const [r, c] of affected) this.refreshCell(r, c);
     this.updateFillHandle();
     this.markDirty();
   }
