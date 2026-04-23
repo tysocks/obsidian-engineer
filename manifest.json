@@ -5,6 +5,6 @@
   "minAppVersion": "1.0.0",
   "description": "Engineering notebook: live variables, inline math evaluation, and cross-file variable sharing.",
   "author": "Tyler Stocking",
-  "authorUrl": "https://github.com/tysocks/obsidian-engineer",
+  "authorUrl": "tysocks/obsidian-engineer",
   "isDesktopOnly": true
 }
