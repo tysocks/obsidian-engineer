@@ -1020,7 +1020,8 @@ export class EngSheetView extends FileView {
     if (errStr) td.addClass("eng-cell-hf-error");
     else td.removeClass("eng-cell-hf-error");
 
-    td.childNodes.forEach(n => { if (n.nodeType === Node.TEXT_NODE) n.remove(); });
+    td.querySelectorAll(".eng-cell-link").forEach(el => el.remove());
+    Array.from(td.childNodes).forEach(n => { if (n.nodeType === Node.TEXT_NODE) n.remove(); });
     this.renderCellContent(td, r, c, value, fmt);
   }
 
