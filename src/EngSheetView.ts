@@ -357,7 +357,7 @@ export class EngSheetView extends FileView {
     try {
       for (const [addr, cell] of Object.entries(sheet.cells)) {
         if (!cell?.f) continue;
-        const m = cell.f.match(/EXPORT\s*\(\s*[^,]+\s*,\s*["']([^"']+)["']\s*(?:,\s*["']([^"']*?)["']\s*)?\)/i);
+        const m = cell.f.match(/EXPORT\s*\(\s*[^,]+\s*,\s*["']([^"']+)["']\s*(?:,\s*["']([^"']*)["']\s*)?\)/i);
         if (!m) continue;
         nowExported.add(m[1]);
         const p = parseAddr(addr);
@@ -753,11 +753,15 @@ export class EngSheetView extends FileView {
         const input = tab.createEl("input", { cls: "eng-sheet-tab-rename-input" }) as HTMLInputElement;
         input.type = "text";
         input.value = sheet.name;
+        let renameCommitted = false;
         const cancel = () => {
+          renameCommitted = true;
           this.renamingSheetIdx = null;
           this.renderTabs();
         };
         const commit = () => {
+          if (renameCommitted) return;
+          renameCommitted = true;
           this.commitRenameSheet(idx, input.value);
         };
         input.onkeydown = (e) => {
@@ -1811,18 +1815,18 @@ export class EngSheetView extends FileView {
   private freezeRows(count: number): void {
     const s = this.currentSheet();
     s.frozen = { rows:count, cols:s.frozen?.cols ?? 0 };
-    this.switchSheet(true);
+    this.switchSheet(true, true);
   }
 
   private freezeCols(count: number): void {
     const s = this.currentSheet();
     s.frozen = { rows:s.frozen?.rows ?? 0, cols:count };
-    this.switchSheet(true);
+    this.switchSheet(true, true);
   }
 
   private unfreeze(): void {
     this.currentSheet().frozen = { rows:0, cols:0 };
-    this.switchSheet(true);
+    this.switchSheet(true, true);
   }
 
   private freezeAtSelection(): void {
@@ -1830,7 +1834,7 @@ export class EngSheetView extends FileView {
     const cols = Math.max(0, this.sel.c1);
     const s = this.currentSheet();
     s.frozen = { rows, cols };
-    this.switchSheet(true);
+    this.switchSheet(true, true);
   }
 
   // ─── Column resize ────────────────────────────────────────────────────────────
@@ -2308,9 +2312,12 @@ export class EngSheetView extends FileView {
 
   // ─── Sheet ops ────────────────────────────────────────────────────────────────
 
-  private switchSheet(markDirty = false): void {
-    this.undoStack = [];
-    this.redoStack = [];
+  private switchSheet(markDirty = false, preserveUndo = false): void {
+    if (!preserveUndo) {
+      this.undoStack = [];
+      this.redoStack = [];
+    }
+    this.renamingSheetIdx = null;
     this.sel = { r0:0, c0:0, r1:0, c1:0 };
     this.prevSel = { ...this.sel };
     this.rebuildHF();

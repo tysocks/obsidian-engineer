@@ -188,7 +188,7 @@ export class VariablePanel extends ItemView {
         : items;
 
     const totalVisible = visible.length;
-    if (totalVisible === 0 && orphaned.length === 0 && overrides.length === 0) {
+    if (totalVisible === 0 && orphaned.length === 0 && overrides.length === 0 && activeNoteEntries.length === 0) {
       listPane.createDiv({
         cls: "eng-empty-state",
         text: all.length === 0
