@@ -21,7 +21,7 @@ Turn Obsidian into a live engineering notebook. Define variables once, use them 
 Requires Node.js 18+.
 
 ```bash
-git clone https://github.com/yourname/obsidian-engineer
+git clone https://github.com/tysocks/obsidian-engineer
 cd obsidian-engineer
 npm install
 npm run build      # produces main.js
@@ -235,15 +235,28 @@ Full Excel-like spreadsheet files with a dedicated editor. Create one with **Ctr
 | Key | Action |
 |-----|--------|
 | Arrow keys | Move selection |
+| Shift+Arrow | Extend selection |
 | Enter / Shift+Enter | Move down / up |
 | Tab / Shift+Tab | Move right / left |
-| F2 or double-click | Start editing |
+| F2 or double-click | Start editing cell |
+| Ctrl+Enter | Confirm edit — stay in current cell |
 | Escape | Cancel edit |
 | Delete / Backspace | Clear cell contents |
 | Ctrl+C / X / V | Copy / Cut / Paste |
 | Ctrl+B / I / U | Bold / Italic / Underline |
+| Ctrl+D | Fill down (copy top row of selection to rows below) |
+| Ctrl+R | Fill right (copy left column of selection to columns right) |
+| Ctrl+; | Insert today's date (YYYY-MM-DD) |
 | Ctrl+Z | Undo |
 | Ctrl+Y / Ctrl+Shift+Z | Redo |
+| Ctrl+F | Find in sheet |
+| Ctrl+H | Find and replace |
+| Ctrl+A | Select all |
+| Ctrl+Home | Jump to A1 |
+| Ctrl+End | Jump to last used cell |
+| Ctrl+Arrow | Jump to edge of data block |
+| Ctrl+Space | Select entire column |
+| Shift+Space | Select entire row |
 | Ctrl+S | Save immediately |
 
 ### Formula entry — point mode
@@ -269,6 +282,18 @@ While typing a formula that starts with `=`, you can select cell references inte
 ### Autofill
 
 Drag the small square handle at the bottom-right of a selection to fill down or right. Formulas have their cell references adjusted automatically. Number series (e.g. 1, 2, 3 → 4, 5, 6) are detected and continued.
+
+### Wikilinks in cells
+
+Cells can contain Obsidian internal links using standard `[[...]]` syntax. Links are rendered as clickable anchors — single-click opens the target note; double-click starts editing the cell.
+
+| Value stored | Displayed as |
+|---|---|
+| `[[Note Name]]` | clickable link labeled **Note Name** |
+| `[[Note Name\|alias]]` | clickable link labeled **alias** |
+| `See also [[Ref\|reference]]` | mixed text with an embedded link |
+
+Links are stored as plain text in the cell value and are fully compatible with find/replace, copy/paste, and undo.
 
 ### Undo / Redo
 
@@ -482,6 +507,9 @@ Toggle individual sections in the sidebar on or off: File, Folder, Path, Tag, Gl
 - Freeze panes, sort, number formats, font/color/border controls
 - `=STORE("varname")` / `=EXPORT(expr, "varname", "scope")`
 - Undo/redo (50 levels), status bar with Sum/Count/Avg
+- Full Excel-compatible keyboard shortcuts (Ctrl+B/I/U/D/R/;/Enter, Ctrl+Arrow, etc.)
+- Wikilink support in cells — `[[Note]]` and `[[Note|alias]]` render as clickable internal links
+- Per-edge border model with correct preservation across edits
 
 ### ✅ Phase 3 — Python execution
 
