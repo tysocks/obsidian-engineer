@@ -922,7 +922,12 @@ export class EngSheetView extends FileView {
       if (e.key.length === 1 && !e.ctrlKey && !e.metaKey) {
         const td = this.cellEls[this.sel.r1]?.[this.sel.c1];
         if (td) {
-          delete this.currentSheet().cells[cellAddr(this.sel.r1, this.sel.c1)];
+          const addr = cellAddr(this.sel.r1, this.sel.c1);
+          const existingStyle = this.currentSheet().cells[addr]?.style;
+          if (existingStyle && Object.keys(existingStyle).length > 0)
+            this.currentSheet().cells[addr] = { v: null, f: null, style: existingStyle };
+          else
+            delete this.currentSheet().cells[addr];
           this.startEdit(this.sel.r1, this.sel.c1, td, e.key);
           e.preventDefault();
         }
@@ -1016,7 +1021,54 @@ export class EngSheetView extends FileView {
     else td.removeClass("eng-cell-hf-error");
 
     td.childNodes.forEach(n => { if (n.nodeType === Node.TEXT_NODE) n.remove(); });
-    td.prepend(document.createTextNode(applyFormat(value, fmt)));
+    this.renderCellContent(td, r, c, value, fmt);
+  }
+
+  private renderCellContent(
+    td: HTMLTableCellElement,
+    r: number,
+    c: number,
+    value: string | number | boolean | null,
+    fmt?: string
+  ): void {
+    const WIKILINK = /\[\[([^\]|]+?)(?:\|([^\]]+?))?\]\]/g;
+    if (typeof value === "string" && WIKILINK.test(value)) {
+      WIKILINK.lastIndex = 0;
+      const frag = document.createDocumentFragment();
+      let last = 0;
+      let m: RegExpExecArray | null;
+      while ((m = WIKILINK.exec(value)) !== null) {
+        if (m.index > last) frag.appendChild(document.createTextNode(value.slice(last, m.index)));
+        const target  = m[1].trim();
+        const display = m[2]?.trim() ?? target;
+        const a = document.createElement("a");
+        a.className = "internal-link eng-cell-link";
+        a.textContent = display;
+        a.title = target;
+        a.href = "#";
+        let openTimer: ReturnType<typeof setTimeout> | null = null;
+        a.addEventListener("click", (ev) => {
+          ev.preventDefault();
+          ev.stopPropagation();
+          if (openTimer) clearTimeout(openTimer);
+          openTimer = setTimeout(() => {
+            openTimer = null;
+            this.app.workspace.openLinkText(target, this.file?.path ?? "");
+          }, 250);
+        });
+        a.addEventListener("dblclick", (ev) => {
+          ev.stopPropagation();
+          if (openTimer) { clearTimeout(openTimer); openTimer = null; }
+          this.startEdit(r, c, td);
+        });
+        frag.appendChild(a);
+        last = m.index + m[0].length;
+      }
+      if (last < value.length) frag.appendChild(document.createTextNode(value.slice(last)));
+      td.prepend(frag);
+    } else {
+      td.prepend(document.createTextNode(applyFormat(value, fmt)));
+    }
   }
 
   private refreshAllCells(): void {
@@ -1405,6 +1457,7 @@ export class EngSheetView extends FileView {
     };
 
     input.onkeydown = (e) => {
+      if (e.key==="Enter" && (e.ctrlKey||e.metaKey)) { e.preventDefault(); e.stopPropagation(); commit(r,c); return; }
       if (e.key==="Enter")  { e.preventDefault(); e.stopPropagation(); commit(r+1,c); return; }
       if (e.key==="Tab")    { e.preventDefault(); e.stopPropagation(); commit(r,c+(e.shiftKey?-1:1)); return; }
       if (e.key==="Escape") { e.preventDefault(); e.stopPropagation(); cancel(); return; }
@@ -1593,18 +1646,19 @@ export class EngSheetView extends FileView {
     if (this.editingCell) return;
     const { r1,c1 } = this.sel;
     if (e.ctrlKey || e.metaKey) {
-      if (e.key === " ") { e.preventDefault(); this.selectCol(c1, e.shiftKey); return; }
-      if (e.key === "ArrowUp")    { e.preventDefault(); this.ctrlNavigate("up", e.shiftKey); return; }
-      if (e.key === "ArrowDown")  { e.preventDefault(); this.ctrlNavigate("down", e.shiftKey); return; }
-      if (e.key === "ArrowLeft")  { e.preventDefault(); this.ctrlNavigate("left", e.shiftKey); return; }
-      if (e.key === "ArrowRight") { e.preventDefault(); this.ctrlNavigate("right", e.shiftKey); return; }
+      if (e.key === " ") { e.preventDefault(); e.stopPropagation(); this.selectCol(c1, e.shiftKey); return; }
+      if (e.key === "ArrowUp")    { e.preventDefault(); e.stopPropagation(); this.ctrlNavigate("up", e.shiftKey); return; }
+      if (e.key === "ArrowDown")  { e.preventDefault(); e.stopPropagation(); this.ctrlNavigate("down", e.shiftKey); return; }
+      if (e.key === "ArrowLeft")  { e.preventDefault(); e.stopPropagation(); this.ctrlNavigate("left", e.shiftKey); return; }
+      if (e.key === "ArrowRight") { e.preventDefault(); e.stopPropagation(); this.ctrlNavigate("right", e.shiftKey); return; }
       switch(e.key.toLowerCase()) {
-        case "f": e.preventDefault(); this.openFindReplaceBar("find"); return;
-        case "h": e.preventDefault(); this.openFindReplaceBar("replace"); return;
-        case "c": e.preventDefault(); this.copySelectionFull(); return;
-        case "x": e.preventDefault(); this.cutSelection(); return;
+        case "f": e.preventDefault(); e.stopPropagation(); this.openFindReplaceBar("find"); return;
+        case "h": e.preventDefault(); e.stopPropagation(); this.openFindReplaceBar("replace"); return;
+        case "c": e.preventDefault(); e.stopPropagation(); this.copySelectionFull(); return;
+        case "x": e.preventDefault(); e.stopPropagation(); this.cutSelection(); return;
         case "v":
           e.preventDefault();
+          e.stopPropagation();
           if (this.clipboard) {
             this.pasteClipboard();
           } else {
@@ -1618,23 +1672,28 @@ export class EngSheetView extends FileView {
             }).catch(() => {});
           }
           return;
-        case "b": e.preventDefault(); this.toggleFormat("bold"); return;
-        case "i": e.preventDefault(); this.toggleFormat("italic"); return;
-        case "u": e.preventDefault(); this.toggleFormat("underline"); return;
-        case "s": e.preventDefault(); this.saveFile(); return;
-        case "a": e.preventDefault(); this.selectAll(); return;
-        case "home": e.preventDefault(); this.setSelection(0,0,0,0); return;
+        case "b": e.preventDefault(); e.stopPropagation(); this.toggleFormat("bold"); return;
+        case "i": e.preventDefault(); e.stopPropagation(); this.toggleFormat("italic"); return;
+        case "u": e.preventDefault(); e.stopPropagation(); this.toggleFormat("underline"); return;
+        case "d": e.preventDefault(); e.stopPropagation(); this.fillDown(); return;
+        case "r": e.preventDefault(); e.stopPropagation(); this.fillRight(); return;
+        case "s": e.preventDefault(); e.stopPropagation(); this.saveFile(); return;
+        case "a": e.preventDefault(); e.stopPropagation(); this.selectAll(); return;
+        case ";": e.preventDefault(); e.stopPropagation(); this.insertDate(); return;
+        case "home": e.preventDefault(); e.stopPropagation(); this.setSelection(0,0,0,0); return;
         case "end": {
           e.preventDefault();
+          e.stopPropagation();
           const last = this.findLastUsedCell();
           this.setSelection(last.r, last.c, last.r, last.c);
           return;
         }
         case "z":
           e.preventDefault();
+          e.stopPropagation();
           if (e.shiftKey) this.redo(); else this.undo();
           return;
-        case "y": e.preventDefault(); this.redo(); return;
+        case "y": e.preventDefault(); e.stopPropagation(); this.redo(); return;
       }
     }
     switch(e.key) {
@@ -1808,6 +1867,62 @@ export class EngSheetView extends FileView {
     this.refreshAllFormulaCells();
     for (const [r, c] of affected) this.refreshCell(r, c);
     this.markDirty();
+  }
+
+  // ─── Fill down / Fill right / Date ───────────────────────────────────────────
+
+  private fillDown(): void {
+    const { r0,c0,r1,c1 } = this.sel;
+    const sR0=Math.min(r0,r1),sR1=Math.max(r0,r1),sC0=Math.min(c0,c1),sC1=Math.max(c0,c1);
+    if (sR0===sR1) return;
+    const sheet = this.currentSheet();
+    this.startUndoBatch();
+    for (let c=sC0; c<=sC1; c++) {
+      const src = sheet.cells[cellAddr(sR0,c)];
+      for (let r=sR0+1; r<=sR1; r++) {
+        const dest = cellAddr(r,c);
+        const before = sheet.cells[dest] ? JSON.parse(JSON.stringify(sheet.cells[dest])) as CellData : undefined;
+        if (!src) delete sheet.cells[dest];
+        else if (src.f) sheet.cells[dest] = { ...src, f: this.adjustFormula(src.f, r-sR0, 0) };
+        else sheet.cells[dest] = { ...src };
+        this.recordCellChange(r, c, before);
+      }
+    }
+    this.commitUndoBatch();
+    this.rebuildHF();
+    this.refreshAllFormulaCells();
+    for (let r=sR0+1; r<=sR1; r++) for (let c=sC0; c<=sC1; c++) this.refreshCell(r,c);
+    this.markDirty();
+  }
+
+  private fillRight(): void {
+    const { r0,c0,r1,c1 } = this.sel;
+    const sR0=Math.min(r0,r1),sR1=Math.max(r0,r1),sC0=Math.min(c0,c1),sC1=Math.max(c0,c1);
+    if (sC0===sC1) return;
+    const sheet = this.currentSheet();
+    this.startUndoBatch();
+    for (let r=sR0; r<=sR1; r++) {
+      const src = sheet.cells[cellAddr(r,sC0)];
+      for (let c=sC0+1; c<=sC1; c++) {
+        const dest = cellAddr(r,c);
+        const before = sheet.cells[dest] ? JSON.parse(JSON.stringify(sheet.cells[dest])) as CellData : undefined;
+        if (!src) delete sheet.cells[dest];
+        else if (src.f) sheet.cells[dest] = { ...src, f: this.adjustFormula(src.f, 0, c-sC0) };
+        else sheet.cells[dest] = { ...src };
+        this.recordCellChange(r, c, before);
+      }
+    }
+    this.commitUndoBatch();
+    this.rebuildHF();
+    this.refreshAllFormulaCells();
+    for (let r=sR0; r<=sR1; r++) for (let c=sC0+1; c<=sC1; c++) this.refreshCell(r,c);
+    this.markDirty();
+  }
+
+  private insertDate(): void {
+    const today = new Date();
+    const iso = `${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,"0")}-${String(today.getDate()).padStart(2,"0")}`;
+    this.setCellRaw(this.sel.r1, this.sel.c1, iso);
   }
 
   // ─── Freeze panes ────────────────────────────────────────────────────────────
