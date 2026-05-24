@@ -1616,11 +1616,40 @@
 
 .eng-find-bar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 6px;
-  padding: 4px 8px;
+  gap: 8px 10px;
+  padding: 6px 8px;
   border-bottom: 1px solid color-mix(in srgb, var(--background-modifier-border) 75%, transparent);
   background: color-mix(in srgb, var(--background-secondary) 86%, var(--background-primary));
+}
+
+.eng-find-scope-wrap,
+.eng-find-match-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.eng-find-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.eng-find-scope {
+  height: 26px;
+  min-width: 140px;
+  border-radius: 6px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-primary);
+  color: var(--text-normal);
+  padding: 0 6px;
+  font-size: 11px;
+}
+
+.eng-find-checkbox {
+  margin: 0;
 }
 
 .eng-find-input {

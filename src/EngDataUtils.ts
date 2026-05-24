@@ -1,6 +1,6 @@
 import { App, TFile } from "obsidian";
 import { HyperFormula } from "hyperformula";
-import { VariableStore } from "./VariableStore";
+import { VariableStore, VariableVisibility } from "./VariableStore";
 
 type TagResolver = (filePath: string) => string[];
 
@@ -264,6 +264,144 @@ export function parseCellAddr(addr: string): { row: number; col: number } | null
   return { col: columnToIndex(m[1]), row: parseInt(m[2], 10) - 1 };
 }
 
+/** Merge duplicate cell keys that denote the same address (case/whitespace variants). */
+export function normalizeEngSheetCellKeys<T extends object>(
+  cells: Record<string, T>
+): Record<string, T> {
+  const out: Record<string, T> = {};
+  for (const [k, v] of Object.entries(cells)) {
+    const p = parseCellAddr(k);
+    if (p) out[indexToColumn(p.col) + (p.row + 1)] = v;
+    else out[k.trim() || k] = v;
+  }
+  return out;
+}
+
+export interface ParsedExportFormula {
+  expr: string;
+  varName: string;
+  unit?: string;
+  scope?: string;
+}
+
+export interface ExportScopeOptions {
+  visibility: VariableVisibility;
+  scopeTag?: string;
+  explicitFolder?: string;
+}
+
+/** Split on commas outside parentheses and quoted strings (for EXPORT argument lists). */
+function splitTopLevelArgs(input: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let quote: '"' | "'" | null = null;
+  let start = 0;
+  for (let i = 0; i < input.length; i++) {
+    const ch = input[i];
+    if (quote) {
+      if (ch === quote && input[i - 1] !== "\\") quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (ch === "(") {
+      depth++;
+      continue;
+    }
+    if (ch === ")") {
+      depth--;
+      continue;
+    }
+    if (ch === "," && depth === 0) {
+      parts.push(input.slice(start, i).trim());
+      start = i + 1;
+    }
+  }
+  parts.push(input.slice(start).trim());
+  return parts;
+}
+
+function unquoteExportArg(raw: string): string {
+  const t = raw.trim();
+  const m = t.match(/^["'](.*)["']$/s);
+  return m ? m[1] : t;
+}
+
+/** True when the third EXPORT argument is a visibility scope, not a unit (backward compatible). */
+export function isExportScopeToken(raw: string): boolean {
+  const lower = raw.trim().toLowerCase();
+  if (!lower) return false;
+  if (lower.startsWith("folder:") || lower.startsWith("tag:")) return true;
+  return /^(global|folder|tag|file|local)$/.test(lower);
+}
+
+/**
+ * Parse =EXPORT(expr, "varname"[, "unit"][, "scope"]).
+ * With three arguments, the third is scope when it matches a scope token; otherwise it is a unit.
+ */
+export function parseExportFormula(formula: string): ParsedExportFormula | null {
+  const trimmed = formula.trim();
+  if (!trimmed.startsWith("=")) return null;
+  const body = trimmed.slice(1).trim();
+  if (!/^EXPORT\s*\(/i.test(body)) return null;
+  const open = body.indexOf("(");
+  const close = body.lastIndexOf(")");
+  if (open < 0 || close <= open) return null;
+  const args = splitTopLevelArgs(body.slice(open + 1, close));
+  if (args.length < 2) return null;
+
+  const expr = args[0];
+  const varName = unquoteExportArg(args[1]);
+  if (!varName) return null;
+
+  let unit: string | undefined;
+  let scope: string | undefined;
+  if (args.length === 3) {
+    const third = unquoteExportArg(args[2]);
+    if (isExportScopeToken(third)) scope = third;
+    else if (third) unit = third;
+  } else if (args.length >= 4) {
+    const third = unquoteExportArg(args[2]);
+    const fourth = unquoteExportArg(args[3]);
+    if (third) unit = third;
+    scope = fourth;
+  }
+
+  return { expr, varName, unit, scope };
+}
+
+/** Map EXPORT scope strings to Variable Store visibility (aligned with ---vars block comments). */
+export function parseExportScope(scopeRaw?: string): ExportScopeOptions {
+  const raw = (scopeRaw ?? "global").trim();
+  const lower = raw.toLowerCase();
+  if (lower.startsWith("tag:")) {
+    return { visibility: "tag", scopeTag: raw.slice(4).trim() || undefined };
+  }
+  if (lower.startsWith("folder:")) {
+    return { visibility: "folder", explicitFolder: raw.slice(7).trim() || undefined };
+  }
+  if (lower === "folder") return { visibility: "folder" };
+  if (lower === "tag") return { visibility: "tag" };
+  if (lower === "file" || lower === "local") return { visibility: "file" };
+  return { visibility: "global" };
+}
+
+/** Replace EXPORT(...) with its inner expression for HyperFormula evaluation. */
+export function stripExportWrapper(formula: string): string {
+  const parsed = parseExportFormula(formula);
+  if (parsed) {
+    const expr = parsed.expr.trim();
+    if (!expr) return formula;
+    return expr.startsWith("=") ? expr : `=${expr}`;
+  }
+  return formula.replace(
+    /EXPORT\s*\(\s*([^,]+?)\s*,\s*["'][^"']*["']\s*(?:,\s*["'][^"']*["']\s*){0,2}\)/gi,
+    (_m, expr) => expr.trim()
+  );
+}
+
 export function parseRange(range: string): RangeCoords | null {
   const raw = range.trim();
   if (!raw) return null;
@@ -382,9 +520,18 @@ export async function readEngSheetRange(
   const parsed = JSON.parse(await app.vault.read(file)) as EngSheetFile;
   const sheet = pickSheet(parsed, sheetName);
   if (!sheet) throw new Error(`Sheet not found: ${sheetName ?? "Sheet1"}`);
+  sheet.cells = normalizeEngSheetCellKeys(sheet.cells ?? {});
 
-  const rows = Math.max(sheet.numRows, range.r1 + 1);
-  const cols = Math.max(sheet.numCols, range.c1 + 1);
+  let maxCellR = -1;
+  let maxCellC = -1;
+  for (const addr of Object.keys(sheet.cells ?? {})) {
+    const p = parseCellAddr(addr);
+    if (!p) continue;
+    if (p.row > maxCellR) maxCellR = p.row;
+    if (p.col > maxCellC) maxCellC = p.col;
+  }
+  const rows = Math.max(sheet.numRows, range.r1 + 1, maxCellR >= 0 ? maxCellR + 1 : 0);
+  const cols = Math.max(sheet.numCols, range.c1 + 1, maxCellC >= 0 ? maxCellC + 1 : 0);
   const data: (string | number | boolean | null)[][] = Array.from({ length: rows }, () =>
     Array(cols).fill(null)
   );
@@ -436,9 +583,6 @@ function resolveCustomFormula(
     if (typeof val === "boolean") return val ? "TRUE" : "FALSE";
     return `"${String(val).replace(/"/g, '""')}"`;
   });
-  out = out.replace(
-    /EXPORT\s*\(\s*([^,]+?)\s*,\s*["'][^"']*["']\s*(?:,\s*["'][^"']*["']\s*)?\)/gi,
-    (_m, expr) => expr.trim()
-  );
+  out = stripExportWrapper(out);
   return out;
 }

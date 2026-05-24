@@ -138,6 +138,28 @@ export default class EngineerPlugin extends Plugin {
       },
     });
 
+    this.addCommand({
+      id: "engsheet-find",
+      name: "Engineering spreadsheet: Find…",
+      checkCallback: (checking) => {
+        const v = this.app.workspace.getActiveViewOfType(EngSheetView);
+        if (!v) return false;
+        if (!checking) v.openFindReplaceFromCommand("find");
+        return true;
+      },
+    });
+
+    this.addCommand({
+      id: "engsheet-replace",
+      name: "Engineering spreadsheet: Replace…",
+      checkCallback: (checking) => {
+        const v = this.app.workspace.getActiveViewOfType(EngSheetView);
+        if (!v) return false;
+        if (!checking) v.openFindReplaceFromCommand("replace");
+        return true;
+      },
+    });
+
     const tagResolver = (filePath: string): string[] => {
       const cache = this.app.metadataCache.getCache(filePath);
       if (!cache) return [];

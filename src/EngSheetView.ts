@@ -23,12 +23,15 @@
  * VARIABLE STORE INTEGRATION
  * Reading  →  =STORE("varname")
  * Writing  →  =EXPORT(expression, "varname")
- *             =EXPORT(expr, "varname", "scope")   scope: global (default), folder, folder:path, tag
+ *             =EXPORT(expr, "varname", "unit")
+ *             =EXPORT(expr, "varname", "scope")
+ *             =EXPORT(expr, "varname", "unit", "scope")
  */
 
 import { FileView, Menu, Notice, WorkspaceLeaf, TFile, setIcon } from "obsidian";
 import { HyperFormula } from "hyperformula";
-import { VariableStore, VariableVisibility } from "./VariableStore";
+import { VariableStore } from "./VariableStore";
+import { normalizeEngSheetCellKeys, parseExportFormula, parseExportScope, stripExportWrapper } from "./EngDataUtils";
 
 type TagResolver = (filePath: string) => string[];
 
@@ -154,15 +157,40 @@ function colLetter(idx: number): string {
 }
 
 function parseAddr(addr: string): { row: number; col: number } | null {
-  const m = addr.match(/^([A-Z]+)(\d+)$/i);
+  const m = addr.trim().match(/^([A-Z]+)(\d+)$/i);
   if (!m) return null;
   let n = 0;
   for (const ch of m[1].toUpperCase()) n = n*26 + ch.charCodeAt(0) - 64;
-  return { col: n-1, row: parseInt(m[2])-1 };
+  return { col: n-1, row: parseInt(m[2], 10) - 1 };
 }
 
 function cellAddr(r: number, c: number): string {
   return colLetter(c) + (r+1);
+}
+
+/** Grow numRows/numCols when cells exist outside declared bounds (common after hand-edited JSON). */
+function ensureSheetCoversAllCells(sheet: SheetData): boolean {
+  let maxR = -1;
+  let maxC = -1;
+  for (const addr of Object.keys(sheet.cells)) {
+    const p = parseAddr(addr);
+    if (!p) continue;
+    if (p.row > maxR) maxR = p.row;
+    if (p.col > maxC) maxC = p.col;
+  }
+  if (maxR < 0) return false;
+  let changed = false;
+  const needRows = Math.max(sheet.numRows, maxR + 1);
+  const needCols = Math.max(sheet.numCols, maxC + 1);
+  if (needRows > sheet.numRows) {
+    sheet.numRows = needRows;
+    changed = true;
+  }
+  if (needCols > sheet.numCols) {
+    sheet.numCols = needCols;
+    changed = true;
+  }
+  return changed;
 }
 
 function applyFormat(value: unknown, fmt?: string): string {
@@ -221,6 +249,7 @@ export class EngSheetView extends FileView {
   private renamingSheetIdx: number | null = null;
   private lastFindTerm = "";
   private lastReplaceTerm = "";
+  private lastFindScope: "sheet" | "selection" = "sheet";
   private undoStack: UndoEntry[] = [];
   private redoStack: UndoEntry[] = [];
   private _batchEntry: UndoEntry | null = null;
@@ -240,6 +269,8 @@ export class EngSheetView extends FileView {
   private findBarEl!: HTMLElement;
   private findInputEl!: HTMLInputElement;
   private replaceInputEl!: HTMLInputElement;
+  private findScopeSelect!: HTMLSelectElement;
+  private findMatchCaseEl!: HTMLInputElement;
   private formulaSuggestId = `eng-formula-suggest-${Math.random().toString(36).slice(2)}`;
   private fmtSelect!: HTMLSelectElement;
   private gridScrollEl!: HTMLElement;
@@ -305,6 +336,7 @@ export class EngSheetView extends FileView {
 
   private rebuildHF(): void {
     const sheet = this.currentSheet();
+    const expanded = ensureSheetCoversAllCells(sheet);
     const data: (string | number | boolean | null)[][] =
       Array.from({ length: sheet.numRows }, () => Array(sheet.numCols).fill(null) as (string|number|boolean|null)[]);
     for (const [addr, cell] of Object.entries(sheet.cells)) {
@@ -317,6 +349,15 @@ export class EngSheetView extends FileView {
       this.hf = HyperFormula.buildFromArray(data, { licenseKey: "gpl-v3" });
     } catch(e) { console.warn("[Engineer] HF error:", e); }
     this.processExports();
+
+    if (expanded) {
+      if (this.tableEl) {
+        this.buildGrid();
+        this.refreshAllCells();
+        this.updateSelection();
+      }
+      this.markDirty();
+    }
   }
 
   private updateHFCell(r: number, c: number): void {
@@ -326,7 +367,9 @@ export class EngSheetView extends FileView {
       const hfInst = this.hf as { setCellContents: (addr: object, content: unknown) => void };
       const content = cell?.f ? this.resolveCustomFuncs(cell.f) : (cell?.v ?? null);
       hfInst.setCellContents({ sheet:0, row:r, col:c }, [[content]]);
-    } catch { /* fall back to full rebuild */ }
+    } catch {
+      this.rebuildHF();
+    }
     this.processExports();
   }
 
@@ -339,9 +382,20 @@ export class EngSheetView extends FileView {
       if (typeof val === "boolean") return val ? "TRUE" : "FALSE";
       return `"${String(val).replace(/"/g,'""')}"`;
     });
-    f = f.replace(/EXPORT\s*\(\s*([^,]+?)\s*,\s*["'][^"']*["']\s*(?:,\s*["'][^"']*["']\s*)?\)/gi,
-      (_m, expr) => expr.trim());
+    f = stripExportWrapper(f);
     return f;
+  }
+
+  private resolveExportUnit(
+    varName: string,
+    filePath: string,
+    explicitUnit?: string
+  ): string | undefined {
+    if (explicitUnit) return explicitUnit;
+    const prior = this.store.getAllEntries().find(
+      (e) => e.key === varName && e.entry.source === filePath && e.entry.block === "engsheet"
+    );
+    return prior?.entry.unit;
   }
 
   private processExports(): void {
@@ -357,21 +411,26 @@ export class EngSheetView extends FileView {
     try {
       for (const [addr, cell] of Object.entries(sheet.cells)) {
         if (!cell?.f) continue;
-        const m = cell.f.match(/EXPORT\s*\(\s*[^,]+\s*,\s*["']([^"']+)["']\s*(?:,\s*["']([^"']*)["']\s*)?\)/i);
-        if (!m) continue;
-        nowExported.add(m[1]);
+        const parsed = parseExportFormula(cell.f);
+        if (!parsed) continue;
+        nowExported.add(parsed.varName);
         const p = parseAddr(addr);
         if (!p) continue;
         const value = this.getComputedValue(p.row, p.col);
         if (value !== null && value !== undefined) {
-          const rawScope = (m[2] ?? "global").trim();
-          const lower = rawScope.toLowerCase();
-          let vis: VariableVisibility = "global";
-          let explicitFolder: string | undefined;
-          if (lower.startsWith("folder:")) { vis = "folder"; explicitFolder = rawScope.slice(7).trim() || undefined; }
-          else if (lower === "folder") { vis = "folder"; }
-          else if (lower === "tag") { vis = "tag"; }
-          this.store.set(m[1], value, undefined, filePath, "engsheet", "global", vis, undefined, explicitFolder);
+          const { visibility, scopeTag, explicitFolder } = parseExportScope(parsed.scope);
+          const unit = this.resolveExportUnit(parsed.varName, filePath, parsed.unit);
+          this.store.set(
+            parsed.varName,
+            value,
+            unit,
+            filePath,
+            "engsheet",
+            "global",
+            visibility,
+            scopeTag,
+            explicitFolder
+          );
         }
       }
       for (const name of prevExported) {
@@ -408,7 +467,8 @@ export class EngSheetView extends FileView {
       const parsed = JSON.parse(raw) as EngSheetFile;
       parsed.meta ??= {};
       for (const s of parsed.sheets) {
-        s.cells ??= {}; s.colWidths ??= {}; s.rowHeights ??= {};
+        s.cells = normalizeEngSheetCellKeys(s.cells ?? {});
+        s.colWidths ??= {}; s.rowHeights ??= {};
         s.numRows ??= DEFAULT_ROWS; s.numCols ??= DEFAULT_COLS;
         s.frozen ??= { rows: 0, cols: 0 };
         s.hidden ??= false;
@@ -582,8 +642,20 @@ export class EngSheetView extends FileView {
     this.rBtn(sg, "arrow-down-z-a", "Sort Z → A (descending)", () => this.sortColumn(false), "Z → A");
 
     const fg = this.grp(panel, "Find");
-    this.rBtn(fg, "search", "Find in sheet (Ctrl+F)", () => this.openFindReplaceBar("find"), "Find");
-    this.rBtn(fg, "replace", "Replace in sheet (Ctrl+H)", () => this.openFindReplaceBar("replace"), "Replace");
+    this.rBtn(
+      fg,
+      "search",
+      "Find in sheet (Ctrl+F when the grid is focused, or use command Engineering spreadsheet: Find…)",
+      () => this.openFindReplaceBar("find"),
+      "Find"
+    );
+    this.rBtn(
+      fg,
+      "replace",
+      "Replace in sheet (Ctrl+H when the grid is focused, or use command Engineering spreadsheet: Replace…)",
+      () => this.openFindReplaceBar("replace"),
+      "Replace"
+    );
 
     const ng = this.grp(panel, "Names");
     this.rBtn(ng, "bookmark-plus", "Define named range from current selection", () => this.defineNamedRange(), "Define");
@@ -1023,6 +1095,14 @@ export class EngSheetView extends FileView {
     td.querySelectorAll(".eng-cell-link").forEach(el => el.remove());
     Array.from(td.childNodes).forEach(n => { if (n.nodeType === Node.TEXT_NODE) n.remove(); });
     this.renderCellContent(td, r, c, value, fmt);
+
+    // Tooltip with full numeric precision — formatted display can round (e.g. 0.77 → "0.8"
+    // with one decimal) while formulas use the stored value, which confuses expectations.
+    if (typeof value === "number" && Number.isFinite(value)) {
+      td.title = String(value);
+    } else {
+      td.title = "";
+    }
   }
 
   private renderCellContent(
@@ -1615,7 +1695,6 @@ export class EngSheetView extends FileView {
     const sheet    = this.currentSheet();
     const existing = sheet.cells[addr];
     const before   = existing ? JSON.parse(JSON.stringify(existing)) as CellData : undefined;
-    const wasFormula = !!existing?.f;
 
     if (!raw.trim()) {
       if (existing?.style && Object.keys(existing.style).length > 0)
@@ -1629,16 +1708,16 @@ export class EngSheetView extends FileView {
     }
 
     this.recordCellChange(r, c, before);
-
-    const isFormula = !!sheet.cells[addr]?.f;
-    if (isFormula || wasFormula) {
-      this.updateHFCell(r, c);
-      this.refreshAllFormulaCells();
-    } else {
-      this.refreshCell(r, c);
-    }
+    this.syncEngineAfterCellEdit(r, c);
     this.markDirty();
     this.refreshFormulaBar();
+  }
+
+  /** Push one cell into HyperFormula and refresh dependent formulas (including EXPORT). */
+  private syncEngineAfterCellEdit(r: number, c: number): void {
+    this.updateHFCell(r, c);
+    this.refreshAllFormulaCells();
+    this.refreshCell(r, c);
   }
 
   // ─── Keyboard ─────────────────────────────────────────────────────────────────
@@ -2009,21 +2088,39 @@ export class EngSheetView extends FileView {
 
     this.findInputEl = bar.createEl("input", {
       cls: "eng-find-input",
-      attr: { type: "text", placeholder: "Find in sheet..." },
+      attr: { type: "text", placeholder: "Find…" },
     }) as HTMLInputElement;
     this.replaceInputEl = bar.createEl("input", {
       cls: "eng-find-input",
-      attr: { type: "text", placeholder: "Replace with..." },
+      attr: { type: "text", placeholder: "Replace with…" },
     }) as HTMLInputElement;
+
+    const scopeWrap = bar.createDiv({ cls: "eng-find-scope-wrap" });
+    scopeWrap.createSpan({ cls: "eng-find-label", text: "Scope" });
+    this.findScopeSelect = scopeWrap.createEl("select", { cls: "eng-find-scope" }) as HTMLSelectElement;
+    this.findScopeSelect.createEl("option", { text: "Entire sheet", attr: { value: "sheet" } });
+    this.findScopeSelect.createEl("option", { text: "Current selection", attr: { value: "selection" } });
+    this.findScopeSelect.value = this.lastFindScope;
+
+    const mcWrap = bar.createDiv({ cls: "eng-find-match-wrap" });
+    this.findMatchCaseEl = mcWrap.createEl("input", {
+      cls: "eng-find-checkbox",
+      attr: { type: "checkbox" },
+    }) as HTMLInputElement;
+    mcWrap.createSpan({ cls: "eng-find-label", text: "Match case" });
 
     const findNextBtn = bar.createEl("button", { cls: "eng-find-btn", text: "Next" });
     const replaceBtn = bar.createEl("button", { cls: "eng-find-btn", text: "Replace all" });
     const closeBtn = bar.createEl("button", { cls: "eng-find-btn", text: "Close" });
 
+    this.findScopeSelect.onchange = () => {
+      this.lastFindScope = this.findScopeSelect.value as "sheet" | "selection";
+    };
+
     this.findInputEl.onkeydown = (e) => {
       if (e.key === "Enter") {
         e.preventDefault();
-        this.findNext(this.findInputEl.value.trim(), true);
+        this.findNext(this.findInputEl.value.trim());
       }
       if (e.key === "Escape") {
         e.preventDefault();
@@ -2040,14 +2137,20 @@ export class EngSheetView extends FileView {
         this.closeFindReplaceBar();
       }
     };
-    findNextBtn.onclick = () => this.findNext(this.findInputEl.value.trim(), true);
+    findNextBtn.onclick = () => this.findNext(this.findInputEl.value.trim());
     replaceBtn.onclick = () => this.replaceAll(this.findInputEl.value.trim(), this.replaceInputEl.value);
     closeBtn.onclick = () => this.closeFindReplaceBar();
+  }
+
+  /** Invoked from the plugin command palette / hotkey when this spreadsheet view is active. */
+  openFindReplaceFromCommand(mode: "find" | "replace"): void {
+    this.openFindReplaceBar(mode);
   }
 
   private openFindReplaceBar(mode: "find" | "replace"): void {
     if (!this.findBarEl) return;
     this.findBarEl.style.display = "";
+    this.findScopeSelect.value = this.lastFindScope;
     const seed = this.lastFindTerm || this.getCellDisplay(this.sel.r1, this.sel.c1);
     this.findInputEl.value = seed;
     if (mode === "replace") {
@@ -2066,18 +2169,53 @@ export class EngSheetView extends FileView {
     this.gridScrollEl?.focus();
   }
 
-  private findNext(term: string, wrap = false): void {
+  private getFindRangeBounds(): { r0: number; r1: number; c0: number; c1: number } {
+    const s = this.currentSheet();
+    const scope = this.findScopeSelect?.value ?? "sheet";
+    if (scope === "selection") {
+      return {
+        r0: Math.min(this.sel.r0, this.sel.r1),
+        r1: Math.max(this.sel.r0, this.sel.r1),
+        c0: Math.min(this.sel.c0, this.sel.c1),
+        c1: Math.max(this.sel.c0, this.sel.c1),
+      };
+    }
+    return { r0: 0, r1: s.numRows - 1, c0: 0, c1: s.numCols - 1 };
+  }
+
+  private cellTextMatches(haystack: string, needle: string): boolean {
+    if (!needle) return false;
+    const mc = !!this.findMatchCaseEl?.checked;
+    if (mc) return haystack.includes(needle);
+    return haystack.toLowerCase().includes(needle.toLowerCase());
+  }
+
+  /** Regex escape + global replace; matchCase false uses case-insensitive flag. */
+  private replaceAllOccurrencesInText(input: string, find: string, replace: string, matchCase: boolean): string {
+    const escaped = find.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const flags = matchCase ? "g" : "gi";
+    return input.replace(new RegExp(escaped, flags), replace);
+  }
+
+  private findNext(term: string): void {
     if (!term) return;
     this.lastFindTerm = term;
-    const s = this.currentSheet();
-    const total = s.numRows * s.numCols;
-    const start = this.sel.r1 * s.numCols + this.sel.c1 + 1;
-    for (let i = 0; i < total; i++) {
-      const idx = wrap ? (start + i) % total : start + i;
-      if (idx >= total) break;
-      const r = Math.floor(idx / s.numCols);
-      const c = idx % s.numCols;
-      if (this.getCellDisplay(r, c).toLowerCase().includes(term.toLowerCase())) {
+    const { r0, r1, c0, c1 } = this.getFindRangeBounds();
+    const cols = c1 - c0 + 1;
+    const total = cols * (r1 - r0 + 1);
+    if (total <= 0) return;
+
+    const ar = this.sel.r1;
+    const ac = this.sel.c1;
+    const anchorR = Math.min(Math.max(ar, r0), r1);
+    const anchorC = Math.min(Math.max(ac, c0), c1);
+    const startLinear = (anchorR - r0) * cols + (anchorC - c0);
+
+    for (let step = 1; step <= total; step++) {
+      const li = (startLinear + step) % total;
+      const r = r0 + Math.floor(li / cols);
+      const c = c0 + (li % cols);
+      if (this.cellTextMatches(this.getCellDisplay(r, c), term)) {
         this.setSelection(r, c, r, c);
         return;
       }
@@ -2089,27 +2227,42 @@ export class EngSheetView extends FileView {
     if (!find) return;
     this.lastFindTerm = find;
     this.lastReplaceTerm = replace;
+    const matchCase = !!this.findMatchCaseEl?.checked;
+    const { r0, r1, c0, c1 } = this.getFindRangeBounds();
     const s = this.currentSheet();
     let changed = 0;
     this.startUndoBatch();
-    const target = find.toLowerCase();
-    for (let r = 0; r < s.numRows; r++) {
-      for (let c = 0; c < s.numCols; c++) {
+    for (let r = r0; r <= r1; r++) {
+      for (let c = c0; c <= c1; c++) {
         const addr = cellAddr(r, c);
         const cell = s.cells[addr];
         if (!cell) continue;
+
         if (cell.f) {
-          if (cell.f.toLowerCase().includes(target)) {
-            const before = JSON.parse(JSON.stringify(cell)) as CellData;
-            cell.f = this.replaceInsensitive(cell.f, find, replace);
-            this.recordCellChange(r, c, before);
-            changed++;
-          }
+          if (!this.cellTextMatches(cell.f, find)) continue;
+          const before = JSON.parse(JSON.stringify(cell)) as CellData;
+          cell.f = this.replaceAllOccurrencesInText(cell.f, find, replace, matchCase);
+          this.recordCellChange(r, c, before);
+          changed++;
           continue;
         }
-        if (typeof cell.v === "string" && cell.v.toLowerCase().includes(target)) {
+
+        if (typeof cell.v === "string") {
+          if (!this.cellTextMatches(cell.v, find)) continue;
           const before = JSON.parse(JSON.stringify(cell)) as CellData;
-          cell.v = this.replaceInsensitive(cell.v, find, replace);
+          cell.v = this.replaceAllOccurrencesInText(cell.v, find, replace, matchCase);
+          this.recordCellChange(r, c, before);
+          changed++;
+          continue;
+        }
+
+        if (typeof cell.v === "number") {
+          const str = String(cell.v);
+          if (!this.cellTextMatches(str, find)) continue;
+          const before = JSON.parse(JSON.stringify(cell)) as CellData;
+          const out = this.replaceAllOccurrencesInText(str, find, replace, matchCase);
+          const parsed = Number(out);
+          cell.v = out.trim() !== "" && Number.isFinite(parsed) ? parsed : out;
           this.recordCellChange(r, c, before);
           changed++;
         }
@@ -2121,7 +2274,7 @@ export class EngSheetView extends FileView {
       this.refreshAllFormulaCells();
       this.refreshAllCells();
       this.markDirty();
-      this.flashStatus(`Replaced ${changed} match${changed === 1 ? "" : "es"}.`);
+      this.flashStatus(`Replaced ${changed} cell${changed === 1 ? "" : "s"} containing matches.`);
     } else {
       this.flashStatus("No matches to replace.");
     }
@@ -2132,11 +2285,6 @@ export class EngSheetView extends FileView {
     if (!cell) return "";
     if (cell.f) return cell.f;
     return String(cell.v ?? "");
-  }
-
-  private replaceInsensitive(input: string, find: string, replace: string): string {
-    const escaped = find.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    return input.replace(new RegExp(escaped, "gi"), replace);
   }
 
   private getNamedRanges(): Record<string, NamedRangeDef> {
@@ -2598,18 +2746,38 @@ export class EngSheetView extends FileView {
     const { r1,c1 } = this.sel;
     const addr = cellAddr(r1,c1);
     const cell = this.currentSheet().cells[addr];
-    const existing = cell?.f?.match(/EXPORT\s*\(\s*[^,]+\s*,\s*["']([^"']+)["']/i)?.[1] ?? "";
+    const parsed = cell?.f ? parseExportFormula(cell.f) : null;
+    const existing = parsed?.varName ?? "";
     const varName = prompt(`Export cell ${addr} to Variable Store.\nVariable name (empty to remove):`, existing);
     if (varName === null) return;
     if (!varName.trim()) {
-      const inner = cell?.f?.match(/EXPORT\s*\(\s*([^,]+)\s*,/i)?.[1]?.trim();
+      const inner = parsed?.expr ?? cell?.f?.match(/EXPORT\s*\(\s*([^,]+)\s*,/i)?.[1]?.trim();
       if (inner) this.setCellRaw(r1, c1, `=${inner}`);
       return;
     }
-    const innerExpr = cell?.f
-      ? (cell.f.match(/EXPORT\s*\(\s*([^,]+)\s*,/i)?.[1]?.trim() ?? cell.f.replace(/^=/,""))
-      : String(cell?.v ?? "0");
-    this.setCellRaw(r1, c1, `=EXPORT(${innerExpr},"${varName.trim()}")`);
+    const innerExpr = parsed?.expr
+      ?? (cell?.f
+        ? (cell.f.match(/EXPORT\s*\(\s*([^,]+)\s*,/i)?.[1]?.trim() ?? cell.f.replace(/^=/,""))
+        : String(cell?.v ?? "0"));
+    const unitSeed = parsed?.unit ?? this.store.getEntry(varName.trim(), this.file?.path, this.tagResolver)?.unit ?? "";
+    const unit = prompt(`Unit for "${varName.trim()}" (optional, e.g. Pa, N, m):`, unitSeed);
+    if (unit === null) return;
+    const scopeSeed = parsed?.scope ?? "global";
+    const scope = prompt(
+      `Scope for "${varName.trim()}" (optional: global, folder, folder:path, tag, tag:name, file):`,
+      scopeSeed
+    );
+    if (scope === null) return;
+    const unitArg = unit.trim();
+    const scopeArg = scope.trim();
+    const scoped = scopeArg && scopeArg.toLowerCase() !== "global";
+    const esc = (s: string) => s.replace(/"/g, '""');
+    let formula = `=EXPORT(${innerExpr},"${esc(varName.trim())}"`;
+    if (unitArg && scoped) formula += `,"${esc(unitArg)}","${esc(scopeArg)}"`;
+    else if (unitArg) formula += `,"${esc(unitArg)}"`;
+    else if (scoped) formula += `,"${esc(scopeArg)}"`;
+    formula += ")";
+    this.setCellRaw(r1, c1, formula);
     new Notice(`${addr} → Variable Store as "${varName.trim()}"`);
   }
 
